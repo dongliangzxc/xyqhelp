@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         梦幻 cbg 法伤计算工具
-// @namespace    https://github.com/dongliangzxc/xyqhelp 
+// @name         New Userscript
+// @namespace    https://github.com/dongliangzxc/xyqhelp
 // @version      0.1
 // @description  try to take over the world!
-// @author       Jason D
+// @author       Jason Dong
 // @match        *://xyq.cbg.163.com/cgi-bin/query.py?*
 // @require      http://cdn.bootcss.com/jquery/1.8.3/jquery.min.js
 // ==/UserScript==
@@ -21,7 +21,7 @@
     }
     if(!leixing){
         leixing = "fa";
-        localStorage.TM_is_faxi = "fa";
+        localStorage.TM_leixing = "fa";
     }
 
     var getJueSezhuangbeiStr = document.getElementsByName('equip_kind')[0].labels[0].innerText;
@@ -81,7 +81,7 @@
             }
         }
 
-        temp = $("input:text[id='txt_is_faxi']").val();
+        temp = $("input:text[id='txt_leixing']").val();
         leixing = temp;
         localStorage.TM_leixing = leixing;
         return {
@@ -105,7 +105,7 @@
             if(oldPrice.length > 0 ){
                 if(oldPrice[0].parentNode.children[1].nodeName != "SPAN"){ //判断是否存在计算价格
                     let newElement = document.createElement('span');
-                    newElement.innerHTML = "【"+price.toFixed(2)+"】";
+                    newElement.innerHTML = "【"+price+"】";
                     for(let j=4;j>-1;j--){
                         if(price<Math.pow(10,j+2)) newElement.className = priceClass[j];  //可以改变计算价格的显示颜色
                     }
@@ -114,7 +114,7 @@
                 }
                 else {
                     let newElement = document.createElement('span');
-                    newElement.innerHTML = "【"+price.toFixed(2)+"】";
+                    newElement.innerHTML = "【"+price+"】";
                     for(let j=4;j>-1;j--){
                         if(price<Math.pow(10,j+2)) newElement.className = priceClass[j];
                     }
@@ -123,6 +123,101 @@
                 }
             }
         }
+    }
+
+    function getXiangqianBaoshi(str){
+        var baoshi = str.match(/镶嵌宝石 (\S+)#r/);
+        if(baoshi){
+            return baoshi[1];
+        }
+        return "";
+    }
+
+    function calFangju(equipObj, zhongzu, leixing){
+        var shuxingzhuanhuan = {
+            fa:{
+                防御: 4 / 10.5,
+                气血: 3 / 7 / 5,
+                敏捷: 1,
+                灵力: 1 / 0.7,
+                速度: 1 / 0.7,
+                体质: 1,
+                魔力: 1,
+                力量: 5 / 7,
+                耐力: 1,
+            },
+            wu:{
+                防御: 1 / 1.5,
+                气血: 1 / 5,
+                敏捷: 1,
+                灵力: 1 / 0.7,
+                速度: 1 / 0.7,
+                体质: 1,
+                魔力: 1 / 7,
+                力量: 1,
+                耐力: 1,
+            },
+            other:{
+                防御: 6 / 7 / 1.5,
+                气血: 6 / 7 / 1.5,
+                敏捷: 1,
+                灵力: 1 / 0.7,
+                速度: 1 / 0.7,
+                体质: 1,
+                魔力: 1 / 7,
+                力量: 1 / 7,
+                耐力: 1,
+            }
+        };
+        var shuxing = {
+            防御:0,
+            气血:0,
+            敏捷:0,
+            灵力:0,
+            速度:0,
+            体质:0,
+            魔力:0,
+            力量:0,
+            耐力:0,
+        };
+        var baoshi_shuxing_map = {
+            黑宝石:'速度',
+            月亮石:'防御',
+            舍利子:'灵力',
+            光芒石:'气血',
+        };
+        var baoshi_number = {
+            黑宝石:8,
+            月亮石:12,
+            舍利子:6,
+            光芒石:40,
+        }
+        for(var i = 0; i < equipObj.main_attrs.length; i++){
+            if(shuxing[equipObj.main_attrs[i][0]] >= 0){
+                shuxing[equipObj.main_attrs[i][0]] += parseInt(equipObj.main_attrs[i][1]);
+            }
+        }
+        var arrMatch = [];
+        if(equipObj.add_melt_attrs){
+            for(i = 0; i < equipObj.add_melt_attrs.length; i++){
+                arrMatch = equipObj.add_melt_attrs[i].match(/(\S+) ([+|-]\d+)/);
+                if(arrMatch){
+                    shuxing[arrMatch[1]] += parseInt(arrMatch[2]);
+                }
+            }
+        }
+        if(equipObj.gem_level != 0){
+            var strBaoshi = getXiangqianBaoshi(equipObj.desc);
+            if(baoshi_number[strBaoshi]){
+                shuxing[baoshi_shuxing_map[strBaoshi]] -= baoshi_number[strBaoshi] * equipObj.gem_level;
+            }
+        }
+        var shuxingdian = 0;
+        for(i in shuxing){
+            console.log(i);
+            shuxingdian += shuxingzhuanhuan[leixing][i] * shuxing[i];
+        }
+        return shuxingdian.toFixed(2) + '属性点';
     }
 
     function calPrice(role, zhongzu , leixing){
@@ -138,16 +233,20 @@
 
         //先计算武器
         var type_wuqi = ['剑'];
+        var type_fangju = ['男衣', '女衣', '女头', '男头', '腰带', '鞋子', '饰品'];
         var equipType = document.getElementById('s_role_type').selectedOptions[0].outerText;
 
         var defaultShuxing = 0;
+        if(type_fangju.indexOf(equipType) >= 0){
+            return calFangju(equipObj, zhongzu, leixing);
+        }
 
         if(equipObj.gem_level != 0){
             var test = equipObj.desc.match(/镶嵌宝石 (\S+)#r/);
             if(test){
                 if(test[1] == '太阳石'){
                     defaultShuxing -= equipObj.gem_level * 2;
-                }                
+                }
             }
         }
         //计算属性
@@ -160,17 +259,18 @@
             for(i = 0; i < equipObj.vice_attrs.length; i++){
                 var temp = equipObj.vice_attrs[i];
                 defaultShuxing += parseFloat(shuxingzhuanfashang[temp[0]]) * parseInt(temp[1]);
-            }            
+            }
         }
 
         if(equipObj.melt_attrs){
             for(i = 0; i < equipObj.melt_attrs.length; i++){
                 temp = equipObj.melt_attrs[i];
                 defaultShuxing += parseFloat(shuxingzhuanfashang[temp[0]]) * parseInt(temp[1]);
-            }        
+            }
         }
 
-        return defaultShuxing;
+        return defaultShuxing.toFixed(2) + "法伤";
+        // return defaultShuxing;
     }
 
 })();
