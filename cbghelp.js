@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         New Userscript
+// @name         梦幻西游装备属性计算工具
 // @namespace    https://github.com/dongliangzxc/xyqhelp
 // @version      0.1
 // @description  try to take over the world!
