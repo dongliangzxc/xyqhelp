@@ -5,12 +5,14 @@
 // @description  try to take over the world!
 // @author       Jason Dong
 // @match        *://xyq.cbg.163.com/cgi-bin/query.py?*
+// @include      *://xyq.cbg.163.com/cgi-bin/equipquery.py?act=show_overall_search_equip
 // @require      http://cdn.bootcss.com/jquery/1.8.3/jquery.min.js
 // ==/UserScript==
 
 (function() {
     'use strict';
 
+    var bolZhuangbei = 0;
     // Your code here...
     var zhongzu = localStorage.TM_zhongzu;
     var leixing = localStorage.TM_leixing;
@@ -24,8 +26,16 @@
         localStorage.TM_leixing = "fa";
     }
 
-    var getJueSezhuangbeiStr = document.getElementsByName('equip_kind')[0].labels[0].innerText;
-    if(getJueSezhuangbeiStr == "角色装备"){
+    var url = document.URL;
+    if(url == "https://xyq.cbg.163.com/cgi-bin/equipquery.py?act=show_overall_search_equip"){
+        bolZhuangbei = 1;
+    }else{
+        var getJueSezhuangbeiStr = document.getElementsByName('equip_kind')[0].labels[0].innerText;
+        if(getJueSezhuangbeiStr == "角色装备"){
+            bolZhuangbei = 1;
+        }
+    }
+    if(bolZhuangbei == 1){
         $(document).ready(function(){
         var newElement = "<tr>";
             newElement += "<td colspan='10' align='right'>&nbsp;种族：";
@@ -39,8 +49,11 @@
         });
     }
 
-    var objPrev = {'zhongzu':null, 'leixing':null};
+    function isQuanFu(){
+        return document.URL == "https://xyq.cbg.163.com/cgi-bin/equipquery.py?act=show_overall_search_equip";
+    }
 
+    var objPrev = {'zhongzu':null, 'leixing':null};
     function addBtnEvent(id){
         $("#"+id).bind("click", function(){
             if(isFinish(objPrev) === true){
@@ -93,6 +106,9 @@
     function newPriceList(zhongzu, leixing){
         var list = document.getElementById('soldList').getElementsByTagName('tr');
         for(var i = 0; i < list.length; i++){
+            if(list[i].id == 'order_menu'){
+                continue;
+            }
             var price = calPrice(list[i], zhongzu, leixing);
             addCalPrice(list[i], price);
         }
@@ -100,10 +116,14 @@
 
     function addCalPrice(role, price){
         var priceClass = ['p100','p1000','p10000','p100000','p1000000'];
+        var key = 1;
+        if(isQuanFu()){
+            key = 12;
+        }
         for (var i=0;i<priceClass.length;i++){
             var oldPrice=role.getElementsByClassName(priceClass[i]);
             if(oldPrice.length > 0 ){
-                if(oldPrice[0].parentNode.children[1].nodeName != "SPAN"){ //判断是否存在计算价格
+                if(!oldPrice[0].parentNode.children[1] || oldPrice[0].parentNode.children[1].nodeName != "SPAN"){ //判断是否存在计算价格
                     let newElement = document.createElement('span');
                     newElement.innerHTML = "【"+price+"】";
                     for(let j=4;j>-1;j--){
@@ -234,10 +254,15 @@
         //先计算武器
         var type_wuqi = ['剑'];
         var type_fangju = ['男衣', '女衣', '女头', '男头', '腰带', '鞋子', '饰品'];
-        var equipType = document.getElementById('s_role_type').selectedOptions[0].outerText;
+        var kind_fangju = [18, 59, 17, 58, 20, 19, 21];
+
+        var equipType = parseInt(role.getElementsByTagName("img")[0].attributes[14].value);
+
+
+        // var equipType = document.getElementById('s_role_type').selectedOptions[0].outerText;
 
         var defaultShuxing = 0;
-        if(type_fangju.indexOf(equipType) >= 0){
+        if(kind_fangju.indexOf(equipType) >= 0){
             return calFangju(equipObj, zhongzu, leixing);
         }
 
