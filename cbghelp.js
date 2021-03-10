@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         梦幻西游装备属性计算工具
 // @namespace    https://github.com/dongliangzxc/xyqhelp
-// @version      0.1
+// @version      0.3
 // @description  try to take over the world!
 // @author       Jason Dong
 // @match        *://xyq.cbg.163.com/cgi-bin/query.py?*
@@ -16,7 +16,6 @@
     // Your code here...
     var zhongzu = localStorage.TM_zhongzu;
     var leixing = localStorage.TM_leixing;
-    console.log(zhongzu);
     if(!zhongzu){
         zhongzu = "ren";
         localStorage.TM_zhongzu = "ren";
@@ -56,14 +55,9 @@
     var objPrev = {'zhongzu':null, 'leixing':null};
     function addBtnEvent(id){
         $("#"+id).bind("click", function(){
-            if(isFinish(objPrev) === true){
-                alert("计算已经完成");
-            }
-            else{
                 var obj = getInput();
                 newPriceList(obj.zhongzu, obj.leixing);
                 objPrev = obj;
-            }
         });
     }
 
@@ -234,7 +228,6 @@
         }
         var shuxingdian = 0;
         for(i in shuxing){
-            console.log(i);
             shuxingdian += shuxingzhuanhuan[leixing][i] * shuxing[i];
         }
         return shuxingdian.toFixed(2) + '属性点';
@@ -255,9 +248,13 @@
         var type_wuqi = ['剑'];
         var type_fangju = ['男衣', '女衣', '女头', '男头', '腰带', '鞋子', '饰品'];
         var kind_fangju = [18, 59, 17, 58, 20, 19, 21];
+        var equipType;
 
-        var equipType = parseInt(role.getElementsByTagName("img")[0].attributes[14].value);
-
+        if(isQuanFu()){
+            equipType = parseInt(role.getElementsByTagName("img")[0].attributes[14].value);
+        }else{
+            equipType = parseInt(role.getElementsByTagName("img")[0].attributes[16].value);
+        }
 
         // var equipType = document.getElementById('s_role_type').selectedOptions[0].outerText;
 
