@@ -532,6 +532,7 @@
                     firstSeen: now,
                     lastSeen: now,
                     lastPriceChange: now,
+                    lastScannedAt: now,  // 上次在搜索结果里刷到的时间
                     prevPrice: null
                 };
             } else {
@@ -553,16 +554,18 @@
                         prevPrice: old.price,  // 记录旧价格
                         price: data.price,     // 新价格
                         lastSeen: now,
-                        lastPriceChange: now
+                        lastPriceChange: now,
+                        lastScannedAt: now     // 本次刷到
                     };
                 } else {
-                    // 价格未变：只更新非价格类字段，不刷新最后变动时间
+                    // 价格未变：只更新非价格类字段 + 上次刷到时间
                     history[data.id] = {
                         ...old,
                         gongzi: data.gongzi,
                         chengzhang: data.chengzhang,
                         skillNum: data.skillNum,
-                        link: data.link
+                        link: data.link,
+                        lastScannedAt: now     // 本次刷到（可能还在卖）
                     };
                 }
             }
@@ -577,11 +580,18 @@
         const items = Object.values(history);
         items.sort((a, b) => new Date(b.lastSeen) - new Date(a.lastSeen));
 
+        const fmtTime = (s) => {
+            if (!s) return '-';
+            const parts = String(s).split(' ');
+            return parts.length >= 2 ? `${parts[0]}<br>${parts[1]}` : s;
+        };
         let rowsHtml = items.map((item, index) => {
             const hasPriceChange = item.prevPrice != null && item.prevPrice !== item.price;
             const priceHtml = hasPriceChange
                 ? `¥ ${item.price} <span style="color:#999;font-size:11px;text-decoration:line-through;margin-left:4px;">(原 ¥ ${item.prevPrice})</span>`
                 : `¥ ${item.price}`;
+            const priceUpdateTime = item.lastPriceChange || '-';
+            const lastScannedTime = item.lastScannedAt || item.lastSeen || '-';
             return `
             <tr id="row-${item.id}">
                 <td>${index + 1}</td>
@@ -589,7 +599,7 @@
                 <td class="col-price">${priceHtml}</td>
                 <td class="col-attr">攻: ${item.gongzi}<br>成: ${item.chengzhang}</td>
                 <td class="col-skills">${item.skillNum} 技能</td>
-                <td style="font-size:11px; color:#999">${item.lastSeen.split(' ')[0]}<br>${item.lastSeen.split(' ')[1]}</td>
+                <td style="font-size:11px; color:#999">价格更新: ${fmtTime(priceUpdateTime)}<br>上次刷到: ${fmtTime(lastScannedTime)}</td>
                 <td>
                     <a href="${item.link}" target="_blank" style="color:green;margin-right:5px">[查看]</a>
                     <a href="javascript:void(0)" class="del-btn" data-id="${item.id}" style="color:red">[删除]</a>
@@ -609,7 +619,7 @@
                     </div>
                     <div class="modal-body">
                         <table class="history-table">
-                            <thead><tr><th>#</th><th>名称</th><th>价格</th><th>资质/成长</th><th>技能数</th><th>最后更新</th><th>操作</th></tr></thead>
+                            <thead><tr><th>#</th><th>名称</th><th>价格</th><th>资质/成长</th><th>技能数</th><th>价格更新 / 上次刷到</th><th>操作</th></tr></thead>
                             <tbody>${rowsHtml}</tbody>
                         </table>
                     </div>
