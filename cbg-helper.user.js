@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         CBG 捡漏助手 v3.5 (全能筛选修复版)
+// @name         CBG 捡漏助手 v3.5.1 (全能筛选修复版)
 // @namespace    http://tampermonkey.net/
-// @version      3.5
+// @version      3.5.1
 // @description  召唤兽历史记录对比 + 一键保存/读取搜索筛选条件（修复服务器、宝宝、等级按钮不生效问题）。
 // @author       YourName
 // @match        *://*.cbg.163.com/*
