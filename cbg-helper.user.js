@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CBG 捡漏助手 v3.4 (全能筛选修复版)
 // @namespace    http://tampermonkey.net/
-// @version      3.4
+// @version      3.5
 // @description  召唤兽历史记录对比 + 一键保存/读取搜索筛选条件（修复服务器、宝宝、等级按钮不生效问题）。
 // @author       YourName
 // @match        *://*.cbg.163.com/*
@@ -19,6 +19,8 @@
     const HISTORY_KEY = 'cbg_pet_history_v3';
     const CONFIG_KEY = 'cbg_search_configs';
     const HIGHLIGHT_COLOR = '#fff3cd';
+    const KEEPALIVE_INTERVAL_MS = 10 * 60 * 1000; // 保活心跳间隔：10 分钟
+    const KEEPALIVE_MASTER_KEY = 'cbg_keepalive_master_v1'; // 用于多标签页选主
 
     // --- 样式注入 ---
     const style = document.createElement('style');
@@ -338,6 +340,82 @@
         if (statusDiv) statusDiv.innerHTML = '已重置当前筛选条件。';
     }
 
+    // ==========================================
+    // 模块一补充：会话保活（防止长时间无操作掉线）
+    // ==========================================
+
+    let keepAliveTimer = null;
+    const TAB_ID = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+    // 判断当前标签页是否应当作为“保活主标签页”
+    function isKeepAliveMaster() {
+        try {
+            const raw = localStorage.getItem(KEEPALIVE_MASTER_KEY);
+            if (!raw) return true; // 没有记录，当前标签可以成为主
+            const data = JSON.parse(raw);
+            const now = Date.now();
+
+            // 记录已过期，当前标签可以抢占为主
+            if (!data.ts || (now - data.ts) > KEEPALIVE_INTERVAL_MS * 1.5) {
+                return true;
+            }
+
+            // 自己就是主
+            return data.id === TAB_ID;
+        } catch (e) {
+            return true;
+        }
+    }
+
+    function updateKeepAliveMasterStamp() {
+        try {
+            localStorage.setItem(KEEPALIVE_MASTER_KEY, JSON.stringify({
+                id: TAB_ID,
+                ts: Date.now()
+            }));
+        } catch (e) {
+            // 忽略本地存储异常
+        }
+    }
+
+    function startKeepAlive() {
+        if (keepAliveTimer) return; // 避免重复启动
+
+        const statusDiv = document.getElementById('cbg-status');
+
+        const sendPing = () => {
+            // 只有“主标签页”才真正发心跳，避免多标签页一起打请求
+            if (!isKeepAliveMaster()) {
+                return;
+            }
+
+            // 抢占/续约主标签身份
+            updateKeepAliveMasterStamp();
+
+            // 使用 fetch 向当前页面地址发一个轻量 GET，请求只为刷新会话，不做任何页面跳转
+            fetch(window.location.href, {
+                method: 'GET',
+                credentials: 'include',
+                cache: 'no-store'
+            }).then(() => {
+                updateKeepAliveMasterStamp(); // 成功后再续约一次时间戳
+                if (statusDiv) {
+                    const t = new Date().toLocaleTimeString();
+                    statusDiv.innerHTML = `保活中：最近一次心跳 ${t}（每 ${KEEPALIVE_INTERVAL_MS / 60000} 分钟一次，仅当前标签为主时生效）`;
+                }
+            }).catch(() => {
+                if (statusDiv) {
+                    const t = new Date().toLocaleTimeString();
+                    statusDiv.innerHTML = `保活心跳失败 ${t}，稍后自动重试`;
+                }
+            });
+        };
+
+        // 进入页面先尝试一次心跳，然后按固定间隔继续
+        sendPing();
+        keepAliveTimer = setInterval(sendPing, KEEPALIVE_INTERVAL_MS);
+    }
+
     function deleteConfig(configName) {
         if (!confirm(`确定删除配置 "${configName}" 吗？`)) return;
         const allConfigs = getConfigs();
@@ -594,6 +672,9 @@
         });
 
         renderConfigList();
+
+        // 页面加载完成后启动会话保活
+        startKeepAlive();
     }
 
     setTimeout(createPanel, 1000);
