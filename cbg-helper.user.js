@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         CBG 捡漏助手 v3.5.2 (全能筛选修复版)
+// @name         CBG 捡漏助手 v3.5.3 (全能筛选修复版)
 // @namespace    http://tampermonkey.net/
-// @version      3.5.2
+// @version      3.5.3
 // @description  召唤兽历史记录对比 + 一键保存/读取搜索筛选条件（修复服务器、宝宝、等级按钮不生效问题）。
 // @author       YourName
 // @match        *://*.cbg.163.com/*
@@ -21,6 +21,8 @@
     const HIGHLIGHT_COLOR = '#fff3cd';
     const KEEPALIVE_INTERVAL_MS = 10 * 60 * 1000; // 保活心跳间隔：10 分钟
     const KEEPALIVE_MASTER_KEY = 'cbg_keepalive_master_v1'; // 用于多标签页选主
+    const OFFLINE_THRESHOLD_HOURS = 10; // 多少小时未刷到则标记为“可能已下线”（可按需修改）
+    const OFFLINE_THRESHOLD_MS = OFFLINE_THRESHOLD_HOURS * 60 * 60 * 1000;
 
     // --- 样式注入 ---
     const style = document.createElement('style');
@@ -585,6 +587,14 @@
             const parts = String(s).split(' ');
             return parts.length >= 2 ? `${parts[0]}<br>${parts[1]}` : s;
         };
+        const parseTime = (s) => {
+            if (!s) return 0;
+            const t = Date.parse(s);
+            return isNaN(t) ? 0 : t;
+        };
+
+        const nowTs = Date.now();
+
         let rowsHtml = items.map((item, index) => {
             const hasPriceChange = item.prevPrice != null && item.prevPrice !== item.price;
             const priceHtml = hasPriceChange
@@ -592,6 +602,25 @@
                 : `¥ ${item.price}`;
             const priceUpdateTime = item.lastPriceChange || '-';
             const lastScannedTime = item.lastScannedAt || item.lastSeen || '-';
+            const lastScanTs = parseTime(lastScannedTime);
+
+            let statusText = '状态未知';
+            let statusColor = '#999';
+            if (lastScanTs) {
+                const diffMs = nowTs - lastScanTs;
+                const diffMin = diffMs / 60000;
+                if (diffMin <= 10) {
+                    statusText = '本次已刷到';
+                    statusColor = '#28a745';
+                } else if (diffMs <= OFFLINE_THRESHOLD_MS) {
+                    statusText = '最近刷到';
+                    statusColor = '#f0ad4e';
+                } else {
+                    statusText = '可能已下线';
+                    statusColor = '#d9534f';
+                }
+            }
+
             return `
             <tr id="row-${item.id}">
                 <td>${index + 1}</td>
@@ -599,7 +628,11 @@
                 <td class="col-price">${priceHtml}</td>
                 <td class="col-attr">攻: ${item.gongzi}<br>成: ${item.chengzhang}</td>
                 <td class="col-skills">${item.skillNum} 技能</td>
-                <td style="font-size:11px; color:#999">价格更新: ${fmtTime(priceUpdateTime)}<br>上次刷到: ${fmtTime(lastScannedTime)}</td>
+                <td style="font-size:11px; color:#999">
+                    价格更新: ${fmtTime(priceUpdateTime)}<br>
+                    上次刷到: ${fmtTime(lastScannedTime)}<br>
+                    <span style="color:${statusColor}">标记：${statusText}</span>
+                </td>
                 <td>
                     <a href="${item.link}" target="_blank" style="color:green;margin-right:5px">[查看]</a>
                     <a href="javascript:void(0)" class="del-btn" data-id="${item.id}" style="color:red">[删除]</a>
