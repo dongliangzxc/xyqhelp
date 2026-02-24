@@ -21,7 +21,7 @@
     const HIGHLIGHT_COLOR = '#fff3cd';
     const KEEPALIVE_INTERVAL_MS = 10 * 60 * 1000; // 保活心跳间隔：10 分钟
     const KEEPALIVE_MASTER_KEY = 'cbg_keepalive_master_v1'; // 用于多标签页选主
-    const OFFLINE_THRESHOLD_HOURS = 10; // 多少小时未刷到则标记为“可能已下线”（可按需修改）
+    const OFFLINE_THRESHOLD_HOURS = 24 * 7; // 一周（168小时）未刷到则标记为"可能已下线" // 多少小时未刷到则标记为“可能已下线”（可按需修改）
     const OFFLINE_THRESHOLD_MS = OFFLINE_THRESHOLD_HOURS * 60 * 60 * 1000;
     const SCAN_BATCH_KEY = 'cbg_scan_batch_v1'; // 当前扫描批次号
 
