@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         CBG 捡漏助手 v3.6 (历史管理页)
+// @name         CBG 捡漏助手 v3.8 (导入导出)
 // @namespace    http://tampermonkey.net/
-// @version      3.6.1
+// @version      3.8.0
 // @description  召唤兽历史记录对比 + 一键保存/读取搜索筛选条件（修复服务器、宝宝、等级按钮不生效问题）。
 // @author       YourName
 // @match        *://*.cbg.163.com/*
@@ -67,6 +67,7 @@
         .hm-btn-sold { color: #d9534f; border-color: #d9534f; }
         .hm-btn-alive { color: #28a745; border-color: #28a745; }
         .hm-btn-link { text-decoration: none; color: #007bff; }
+        .hm-btn-del { color: #dc3545; border-color: #dc3545; }
         .hm-table .col-price { color: #d9534f; font-weight: bold; }
     `;
     document.head.appendChild(style);
@@ -601,7 +602,7 @@
         statusDiv.innerHTML = `本次扫描: 新增 <b style="color:red">${newCount}</b> | 价格变动 <b style="color:#d9534f">${priceChangeCount}</b> | 已记录 ${total}`;
     }
 
-    function showHistory() {
+    function _removed_showHistory() {
         const history = getHistory();
         const items = Object.values(history);
         items.sort((a, b) => new Date(b.lastSeen) - new Date(a.lastSeen));
@@ -717,11 +718,116 @@
         if(history[id]) { delete history[id]; saveHistory(history); const row = document.getElementById('row-' + id); if(row) row.remove(); }
     }
 
-    function updateItemManualStatus(id, status) {
+    function updateItemManualStatus(id, status, soldPrice) {
         const history = getHistory();
         if (!history[id]) return;
         history[id].manualStatus = status || null;
+        if (status === 'sold' && soldPrice != null) history[id].soldPrice = soldPrice;
+        if (status !== 'sold') delete history[id].soldPrice;
         saveHistory(history);
+    }
+
+    // 详情页自动解析状态与成交价并更新历史
+    function tryParseDetailPageAndUpdate() {
+        const m = location.search.match(/eid=([^&]+)/);
+        if (!m) return null;
+        const eid = decodeURIComponent(m[1]);
+        const bodyText = document.body?.innerText || '';
+        const statusMatch = bodyText.match(/状态[：:]\s*([^\n\r]+)/);
+        const priceMatch = bodyText.match(/价格[：:]\s*[¥]?\s*([\d.]+)/);
+        const statusText = (statusMatch && statusMatch[1] || '').trim();
+        const priceVal = priceMatch ? parseFloat(priceMatch[1]) : null;
+
+        let newStatus = null;
+        if (/买家取走|已售|已卖出|已成交/.test(statusText)) newStatus = 'sold';
+        else if (/已下架/.test(statusText)) newStatus = 'offline';
+        else if (/在售|出售中/.test(statusText)) newStatus = 'alive';
+
+        const history = getHistory();
+        if (!history[eid]) return null;
+        const old = history[eid];
+
+        if (newStatus === 'sold') {
+            history[eid] = { ...old, manualStatus: 'sold', soldPrice: priceVal != null ? priceVal : old.soldPrice };
+            saveHistory(history);
+            return { eid, status: 'sold', price: priceVal };
+        }
+        if (newStatus === 'offline') {
+            history[eid] = { ...old, manualStatus: 'offline' };
+            delete history[eid].soldPrice;
+            saveHistory(history);
+            return { eid, status: 'offline' };
+        }
+        if (newStatus === 'alive') {
+            history[eid] = { ...old, manualStatus: 'alive' };
+            delete history[eid].soldPrice;
+            saveHistory(history);
+            return { eid, status: 'alive' };
+        }
+        return null;
+    }
+
+    function exportHistory() {
+        const history = getHistory();
+        const blob = new Blob([JSON.stringify({
+            version: 1,
+            exportAt: new Date().toISOString(),
+            data: history
+        }, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `cbg_history_${new Date().toISOString().slice(0, 10)}.json`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+    }
+
+    function importHistory() {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json,application/json';
+        input.onchange = () => {
+            const f = input.files?.[0];
+            if (!f) return;
+            const r = new FileReader();
+            r.onload = () => {
+                try {
+                    const raw = JSON.parse(r.result);
+                    const data = raw.data || raw;
+                    if (typeof data !== 'object' || Array.isArray(data)) {
+                        showToast('导入失败：文件格式不正确');
+                        return;
+                    }
+                    const history = getHistory();
+                    let count = 0;
+                    for (const [id, item] of Object.entries(data)) {
+                        if (id && item && typeof item === 'object') {
+                            history[id] = { ...history[id], ...item };
+                            count++;
+                        }
+                    }
+                    saveHistory(history);
+                    showToast(`已导入 ${count} 条，当前共 ${Object.keys(history).length} 条`);
+                    const modal = document.getElementById('cbg-history-manager-modal');
+                    if (modal) modal.dispatchEvent(new CustomEvent('hm-import-done'));
+                } catch (e) {
+                    showToast('导入失败：' + (e.message || '解析错误'));
+                }
+            };
+            r.readAsText(f, 'UTF-8');
+        };
+        input.click();
+    }
+
+    function showToast(msg, type) {
+        const id = 'cbg-toast-' + Date.now();
+        const el = document.createElement('div');
+        el.id = id;
+        el.style.cssText = 'position:fixed;top:20px;right:20px;z-index:999999;padding:12px 20px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.2);font-size:14px;font-family:Microsoft YaHei,sans-serif;max-width:320px;';
+        el.style.background = type === 'success' ? '#28a745' : type === 'info' ? '#17a2b8' : '#333';
+        el.style.color = '#fff';
+        el.textContent = msg;
+        document.body.appendChild(el);
+        setTimeout(() => { const e = document.getElementById(id); if (e) e.remove(); }, 4000);
     }
 
     // ==========================================
@@ -764,6 +870,7 @@
                 if (filterManual === 'untreated' && m) return false;
                 if (filterManual === 'sold' && m !== 'sold') return false;
                 if (filterManual === 'alive' && m !== 'alive') return false;
+                if (filterManual === 'offline' && m !== 'offline') return false;
                 if (keyword && !(item.name || '').toLowerCase().includes(keyword) && !(item.link || '').toLowerCase().includes(keyword)) return false;
                 return true;
             });
@@ -776,8 +883,8 @@
                 const hasPriceChg = item.prevPrice != null && item.prevPrice !== item.price;
                 const priceStr = hasPriceChg ? `¥ ${item.price} <s style="color:#999">(原 ¥ ${item.prevPrice})</s>` : `¥ ${item.price}`;
                 const m = item.manualStatus || '';
-                const manualText = m === 'sold' ? '已确认卖掉' : m === 'alive' ? '已确认还在' : '未处理';
-                const manualColor = m === 'sold' ? '#d9534f' : m === 'alive' ? '#28a745' : '#999';
+                const manualText = m === 'sold' ? (item.soldPrice != null ? `已卖掉 ¥${item.soldPrice}` : '已确认卖掉') : m === 'alive' ? '已确认还在' : m === 'offline' ? '已下架' : '未处理';
+                const manualColor = m === 'sold' ? '#d9534f' : m === 'alive' ? '#28a745' : m === 'offline' ? '#6c757d' : '#999';
                 const esc = s => String(s || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
                 return `
                 <tr data-id="${item.id}" style="background:${auto.key === 'offline' ? '#fff5f5' : ''}">
@@ -793,6 +900,7 @@
                         <button class="hm-btn hm-btn-alive" data-id="${item.id}">还在</button>
                         <button class="hm-btn hm-btn-clear" data-id="${item.id}">清除</button>
                         <a href="${item.link}" target="_blank" class="hm-btn hm-btn-link">查看</a>
+                        <button class="hm-btn hm-btn-del" data-id="${item.id}">删除</button>
                     </td>
                 </tr>`;
             }).join('') || '<tr><td colspan="8" style="text-align:center;padding:20px">暂无符合条件的数据</td></tr>';
@@ -805,9 +913,11 @@
     <div style="background:#fff;width:95%;max-width:1100px;height:90%;border-radius:8px;display:flex;flex-direction:column;box-shadow:0 5px 15px rgba(0,0,0,0.3);overflow:hidden;">
         <div class="hm-header" style="background:#333;color:#fff;padding:12px 20px;display:flex;justify-content:space-between;align-items:center;flex-shrink:0">
             <h1 style="margin:0;font-size:18px">📦 CBG 召唤兽历史管理</h1>
-            <div>
+            <div style="display:flex;align-items:center;gap:10px">
+                <button class="hm-btn" id="hm-export" style="padding:4px 10px;color:#fff;border-color:#fff;background:transparent">导出</button>
+                <button class="hm-btn" id="hm-import" style="padding:4px 10px;color:#fff;border-color:#fff;background:transparent">导入</button>
                 <span id="hm-count">加载中...</span>
-                <span id="hm-close" style="margin-left:15px;cursor:pointer;font-size:24px;color:#fff">&times;</span>
+                <span id="hm-close" style="margin-left:5px;cursor:pointer;font-size:24px;color:#fff">&times;</span>
             </div>
         </div>
         <div class="hm-filters" style="background:#fff;padding:12px 20px;display:flex;gap:16px;align-items:center;flex-wrap:wrap;border-bottom:1px solid #eee">
@@ -823,6 +933,7 @@
                 <option value="untreated">未处理</option>
                 <option value="sold">已确认卖掉</option>
                 <option value="alive">已确认还在</option>
+                <option value="offline">已下架</option>
             </select></label>
             <label style="display:flex;align-items:center;gap:6px">搜索: <input type="text" id="hm-search" placeholder="名称或链接关键字" style="padding:6px 12px;width:180px;border:1px solid #ccc;border-radius:4px"></label>
             <button class="hm-btn" id="hm-apply" style="padding:4px 12px;border:1px solid #ddd;border-radius:4px;cursor:pointer;background:#fff">应用筛选</button>
@@ -848,12 +959,16 @@
         document.getElementById('hm-filter-manual').addEventListener('change', doRender);
         document.getElementById('hm-search').addEventListener('input', () => { clearTimeout(window._hmT); window._hmT = setTimeout(doRender, 200); });
         document.getElementById('hm-apply').addEventListener('click', doRender);
+        document.getElementById('hm-export').addEventListener('click', exportHistory);
+        document.getElementById('hm-import').addEventListener('click', importHistory);
+        modal.addEventListener('hm-import-done', doRender);
         modal.addEventListener('click', (e) => {
             const t = e.target;
             if (!t.dataset || !t.dataset.id) return;
             if (t.classList.contains('hm-btn-sold')) { updateItemManualStatus(t.dataset.id, 'sold'); doRender(); }
             else if (t.classList.contains('hm-btn-alive')) { updateItemManualStatus(t.dataset.id, 'alive'); doRender(); }
             else if (t.classList.contains('hm-btn-clear')) { updateItemManualStatus(t.dataset.id, null); doRender(); }
+            else if (t.classList.contains('hm-btn-del')) { if (confirm('确定删除该条记录？')) { deleteItem(t.dataset.id); doRender(); } }
         });
 
         doRender();
@@ -863,9 +978,8 @@
         const div = document.createElement('div');
         div.id = 'cbg-helper-panel';
         div.innerHTML = `
-            <h3>🐶 召唤兽助手 v3.6</h3>
+            <h3>🐶 召唤兽助手 v3.8</h3>
             <button id="btn-scan" class="cbg-btn btn-scan">🔍 扫描当前页</button>
-            <button id="btn-view" class="cbg-btn btn-view">📜 查看历史库</button>
             <button id="btn-history-mgr" class="cbg-btn btn-view">📑 历史管理</button>
             <button id="btn-clear" class="cbg-btn btn-clear">🗑️ 清空历史</button>
 
@@ -879,7 +993,6 @@
         document.body.appendChild(div);
 
         document.getElementById('btn-scan').addEventListener('click', runScan);
-        document.getElementById('btn-view').addEventListener('click', showHistory);
         document.getElementById('btn-history-mgr').addEventListener('click', showHistoryManagerModal);
         document.getElementById('btn-clear').addEventListener('click', clearHistory);
         document.getElementById('btn-save-config').addEventListener('click', saveCurrentConfig);
@@ -900,5 +1013,24 @@
         startKeepAlive();
     }
 
-    setTimeout(createPanel, 1000);
+    // 详情页：自动解析状态与成交价并更新历史
+    const isDetailPage = /\/equip\b/.test(location.pathname) && /eid=/.test(location.search);
+    if (isDetailPage) {
+        let toastShown = false;
+        const run = () => {
+            const r = tryParseDetailPageAndUpdate();
+            if (r && !toastShown) {
+                toastShown = true;
+                if (r.status === 'sold') showToast(r.price != null ? `已同步：该商品已卖掉，成交价 ¥${r.price}` : '已同步：该商品已卖掉');
+                else if (r.status === 'offline') showToast('已同步：该商品已下架');
+                else if (r.status === 'alive') showToast('已同步：该商品仍在售');
+            }
+        };
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run);
+        else run();
+        setTimeout(run, 2000); // 动态内容可能延迟加载
+        setTimeout(run, 4000);
+    } else {
+        setTimeout(createPanel, 1000);
+    }
 })();
