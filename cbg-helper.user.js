@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         CBG 捡漏助手 v3.5.3 (全能筛选修复版)
+// @name         CBG 捡漏助手 v3.6 (历史管理页)
 // @namespace    http://tampermonkey.net/
-// @version      3.5.3
+// @version      3.6.0
 // @description  召唤兽历史记录对比 + 一键保存/读取搜索筛选条件（修复服务器、宝宝、等级按钮不生效问题）。
 // @author       YourName
 // @match        *://*.cbg.163.com/*
@@ -23,6 +23,7 @@
     const KEEPALIVE_MASTER_KEY = 'cbg_keepalive_master_v1'; // 用于多标签页选主
     const OFFLINE_THRESHOLD_HOURS = 10; // 多少小时未刷到则标记为“可能已下线”（可按需修改）
     const OFFLINE_THRESHOLD_MS = OFFLINE_THRESHOLD_HOURS * 60 * 60 * 1000;
+    const SCAN_BATCH_KEY = 'cbg_scan_batch_v1'; // 当前扫描批次号
 
     // --- 样式注入 ---
     const style = document.createElement('style');
@@ -497,6 +498,19 @@
 
         const now = new Date().toLocaleString();
 
+        // 扫描批次号：每次点击“扫描当前页”自增一次，用于区分哪一批已经验证过
+        let batch = 0;
+        try {
+            batch = parseInt(localStorage.getItem(SCAN_BATCH_KEY) || '0', 10) || 0;
+        } catch (e) {
+            batch = 0;
+        }
+        batch += 1;
+        try {
+            localStorage.setItem(SCAN_BATCH_KEY, String(batch));
+        } catch (e) {}
+        const currentBatch = batch;
+
         const rows = document.querySelectorAll('tr[log-exposure], .equip-list-item, .list-item');
         if (rows.length === 0) {
             statusDiv.innerHTML = "⚠️ 未找到列表";
@@ -535,6 +549,7 @@
                     lastSeen: now,
                     lastPriceChange: now,
                     lastScannedAt: now,  // 上次在搜索结果里刷到的时间
+                    scanBatch: currentBatch, // 所属扫描批次
                     prevPrice: null
                 };
             } else {
@@ -557,7 +572,8 @@
                         price: data.price,     // 新价格
                         lastSeen: now,
                         lastPriceChange: now,
-                        lastScannedAt: now     // 本次刷到
+                        lastScannedAt: now,    // 本次刷到
+                        scanBatch: currentBatch
                     };
                 } else {
                     // 价格未变：只更新非价格类字段 + 上次刷到时间
@@ -567,7 +583,8 @@
                         chengzhang: data.chengzhang,
                         skillNum: data.skillNum,
                         link: data.link,
-                        lastScannedAt: now     // 本次刷到（可能还在卖）
+                        lastScannedAt: now,    // 本次刷到（可能还在卖）
+                        scanBatch: currentBatch
                     };
                 }
             }
@@ -594,6 +611,12 @@
         };
 
         const nowTs = Date.now();
+        // 最近一批扫描的批次号（数值越大越新）
+        let latestBatch = 0;
+        items.forEach(item => {
+            const b = item.scanBatch || 0;
+            if (b > latestBatch) latestBatch = b;
+        });
 
         let rowsHtml = items.map((item, index) => {
             const hasPriceChange = item.prevPrice != null && item.prevPrice !== item.price;
@@ -603,19 +626,25 @@
             const priceUpdateTime = item.lastPriceChange || '-';
             const lastScannedTime = item.lastScannedAt || item.lastSeen || '-';
             const lastScanTs = parseTime(lastScannedTime);
+            const batch = item.scanBatch || 0;
 
             let statusText = '状态未知';
             let statusColor = '#999';
+            // 1. 先用批次标记 “本批已刷到 / 历史批次”
+            if (batch && latestBatch) {
+                if (batch === latestBatch) {
+                    statusText = '本批已刷到';
+                    statusColor = '#28a745';
+                } else {
+                    statusText = '历史批次（需再验证）';
+                    statusColor = '#f0ad4e';
+                }
+            }
+
+            // 2. 如果时间非常久没刷到，则进一步标记为“可能已下线”
             if (lastScanTs) {
                 const diffMs = nowTs - lastScanTs;
-                const diffMin = diffMs / 60000;
-                if (diffMin <= 10) {
-                    statusText = '本次已刷到';
-                    statusColor = '#28a745';
-                } else if (diffMs <= OFFLINE_THRESHOLD_MS) {
-                    statusText = '最近刷到';
-                    statusColor = '#f0ad4e';
-                } else {
+                if (diffMs > OFFLINE_THRESHOLD_MS) {
                     statusText = '可能已下线';
                     statusColor = '#d9534f';
                 }
@@ -681,13 +710,167 @@
         if(history[id]) { delete history[id]; saveHistory(history); const row = document.getElementById('row-' + id); if(row) row.remove(); }
     }
 
+    function updateItemManualStatus(id, status) {
+        const history = getHistory();
+        if (!history[id]) return;
+        history[id].manualStatus = status || null;
+        saveHistory(history);
+    }
+
+    function openHistoryManager() {
+        const url = location.href.split('#')[0] + '#history-manager';
+        window.open(url, '_blank', 'width=1200,height=800');
+    }
+
+    // ==========================================
+    // 独立历史管理页（通过 #history-manager 打开）
+    // ==========================================
+    function initHistoryManagerPage() {
+        function computeAutoStatus(item, latestBatch, nowTs) {
+            const batch = item.scanBatch || 0;
+            const lastScanTs = (item.lastScannedAt || item.lastSeen) ? Date.parse(item.lastScannedAt || item.lastSeen) : 0;
+            if (batch && latestBatch) {
+                if (batch === latestBatch) return { text: '本批已刷到', color: '#28a745', key: 'current' };
+                if (lastScanTs && (nowTs - lastScanTs) > OFFLINE_THRESHOLD_MS) return { text: '可能已下线', color: '#d9534f', key: 'offline' };
+                return { text: '历史批次（需验证）', color: '#f0ad4e', key: 'old' };
+            }
+            return { text: '状态未知', color: '#999', key: 'unknown' };
+        }
+
+        function doRender() {
+            const history = getHistory();
+            let items = Object.values(history);
+            const latestBatch = Math.max(0, ...items.map(i => i.scanBatch || 0));
+            const nowTs = Date.now();
+
+            const filterAuto = document.getElementById('hm-filter-auto').value;
+            const filterManual = document.getElementById('hm-filter-manual').value;
+            const keyword = (document.getElementById('hm-search').value || '').trim().toLowerCase();
+
+            items = items.filter(item => {
+                const auto = computeAutoStatus(item, latestBatch, nowTs);
+                if (filterAuto && filterAuto !== 'all' && auto.key !== filterAuto) return false;
+                const m = item.manualStatus || '';
+                if (filterManual === 'untreated' && m) return false;
+                if (filterManual === 'sold' && m !== 'sold') return false;
+                if (filterManual === 'alive' && m !== 'alive') return false;
+                if (keyword && !(item.name || '').toLowerCase().includes(keyword) && !(item.link || '').toLowerCase().includes(keyword)) return false;
+                return true;
+            });
+
+            items.sort((a, b) => new Date(b.lastSeen || 0) - new Date(a.lastSeen || 0));
+
+            const tbody = document.getElementById('hm-tbody');
+            tbody.innerHTML = items.map((item, i) => {
+                const auto = computeAutoStatus(item, latestBatch, nowTs);
+                const hasPriceChg = item.prevPrice != null && item.prevPrice !== item.price;
+                const priceStr = hasPriceChg ? `¥ ${item.price} <s style="color:#999">(原 ¥ ${item.prevPrice})</s>` : `¥ ${item.price}`;
+                const m = item.manualStatus || '';
+                const manualText = m === 'sold' ? '已确认卖掉' : m === 'alive' ? '已确认还在' : '未处理';
+                const manualColor = m === 'sold' ? '#d9534f' : m === 'alive' ? '#28a745' : '#999';
+                const esc = s => String(s || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                return `
+                <tr data-id="${item.id}" style="background:${auto.key === 'offline' ? '#fff5f5' : ''}">
+                    <td>${i + 1}</td>
+                    <td><a href="${item.link}" target="_blank" style="font-weight:bold;color:#007bff">${esc(item.name)}</a></td>
+                    <td class="col-price">${priceStr}</td>
+                    <td>攻: ${esc(item.gongzi)} / 成: ${esc(item.chengzhang)}</td>
+                    <td>${esc(item.skillNum)} 技能</td>
+                    <td><span style="color:${auto.color}">${auto.text}</span></td>
+                    <td><span style="color:${manualColor}">${manualText}</span></td>
+                    <td>
+                        <button class="hm-btn hm-btn-sold" data-id="${item.id}">卖掉</button>
+                        <button class="hm-btn hm-btn-alive" data-id="${item.id}">还在</button>
+                        <button class="hm-btn hm-btn-clear" data-id="${item.id}">清除</button>
+                        <a href="${item.link}" target="_blank" class="hm-btn hm-btn-link">查看</a>
+                    </td>
+                </tr>`;
+            }).join('') || '<tr><td colspan="8" style="text-align:center;padding:20px">暂无符合条件的数据</td></tr>';
+
+            document.getElementById('hm-count').textContent = `共 ${items.length} 条`;
+        }
+
+        document.body.innerHTML = '';
+        const wrap = document.createElement('div');
+        wrap.innerHTML = `
+<style>
+.hm-header{background:#333;color:#fff;padding:12px 20px;display:flex;justify-content:space-between;align-items:center}
+.hm-header h1{margin:0;font-size:18px}
+.hm-back{color:#fff;text-decoration:none;padding:6px 12px;background:#555;border-radius:4px}
+.hm-filters{background:#fff;padding:12px 20px;margin-bottom:10px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+.hm-filters label{display:flex;align-items:center;gap:6px}
+.hm-filters select{padding:6px 10px;border:1px solid #ccc;border-radius:4px}
+.hm-filters input{padding:6px 12px;width:180px;border:1px solid #ccc;border-radius:4px}
+.hm-content{margin:0 20px 20px;background:#fff;border-radius:8px;overflow:auto;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+.hm-table{width:100%;border-collapse:collapse;font-size:12px}
+.hm-table th{background:#f2f2f2;padding:10px 8px;text-align:left;border-bottom:2px solid #ddd;position:sticky;top:0}
+.hm-table td{padding:8px;border-bottom:1px solid #eee}
+.hm-table tr:hover{background:#f9f9f9}
+.hm-table .col-price{color:#d9534f;font-weight:bold}
+.hm-btn{padding:4px 8px;margin-right:4px;border:1px solid #ddd;border-radius:4px;cursor:pointer;font-size:11px;background:#fff;display:inline-block}
+.hm-btn:hover{background:#eee}
+.hm-btn-sold{color:#d9534f;border-color:#d9534f}
+.hm-btn-alive{color:#28a745;border-color:#28a745}
+.hm-btn-link{text-decoration:none;color:#007bff}
+</style>
+<div class="hm-header">
+    <h1>📦 CBG 召唤兽历史管理</h1>
+    <div>
+        <span id="hm-count">加载中...</span>
+        <a href="javascript:history.back()" class="hm-back">← 返回</a>
+    </div>
+</div>
+<div class="hm-filters">
+    <label>自动状态: <select id="hm-filter-auto">
+        <option value="all">全部</option>
+        <option value="current">本批已刷到</option>
+        <option value="old">历史批次（需验证）</option>
+        <option value="offline">可能已下线</option>
+    </select></label>
+    <label>手动标记: <select id="hm-filter-manual">
+        <option value="all">全部</option>
+        <option value="untreated">未处理</option>
+        <option value="sold">已确认卖掉</option>
+        <option value="alive">已确认还在</option>
+    </select></label>
+    <label>搜索: <input type="text" id="hm-search" placeholder="名称或链接关键字"></label>
+    <button class="hm-btn" id="hm-apply">应用筛选</button>
+</div>
+<div class="hm-content">
+    <table class="hm-table">
+        <thead>
+            <tr>
+                <th>#</th><th>名称</th><th>价格</th><th>资质/成长</th><th>技能数</th><th>自动状态</th><th>手动标记</th><th>操作</th>
+            </tr>
+        </thead>
+        <tbody id="hm-tbody"></tbody>
+    </table>
+</div>`;
+        document.body.appendChild(wrap);
+
+        document.getElementById('hm-filter-auto').addEventListener('change', doRender);
+        document.getElementById('hm-filter-manual').addEventListener('change', doRender);
+        document.getElementById('hm-search').addEventListener('input', () => { clearTimeout(window._hmT); window._hmT = setTimeout(doRender, 200); });
+        document.getElementById('hm-apply').addEventListener('click', doRender);
+        document.addEventListener('click', (e) => {
+            const t = e.target;
+            if (!t.dataset || !t.dataset.id) return;
+            if (t.classList.contains('hm-btn-sold')) { updateItemManualStatus(t.dataset.id, 'sold'); doRender(); }
+            else if (t.classList.contains('hm-btn-alive')) { updateItemManualStatus(t.dataset.id, 'alive'); doRender(); }
+            else if (t.classList.contains('hm-btn-clear')) { updateItemManualStatus(t.dataset.id, null); doRender(); }
+        });
+
+        doRender();
+    }
+
     function createPanel() {
         const div = document.createElement('div');
         div.id = 'cbg-helper-panel';
         div.innerHTML = `
-            <h3>🐶 召唤兽助手 v3.4</h3>
+            <h3>🐶 召唤兽助手 v3.6</h3>
             <button id="btn-scan" class="cbg-btn btn-scan">🔍 扫描当前页</button>
             <button id="btn-view" class="cbg-btn btn-view">📜 查看历史库</button>
+            <button id="btn-history-mgr" class="cbg-btn btn-view">📑 打开历史管理页</button>
             <button id="btn-clear" class="cbg-btn btn-clear">🗑️ 清空历史</button>
 
             <h3>💾 筛选方案管理</h3>
@@ -701,6 +884,7 @@
 
         document.getElementById('btn-scan').addEventListener('click', runScan);
         document.getElementById('btn-view').addEventListener('click', showHistory);
+        document.getElementById('btn-history-mgr').addEventListener('click', openHistoryManager);
         document.getElementById('btn-clear').addEventListener('click', clearHistory);
         document.getElementById('btn-save-config').addEventListener('click', saveCurrentConfig);
         document.getElementById('btn-reset-filters').addEventListener('click', resetCurrentFilters);
@@ -720,5 +904,10 @@
         startKeepAlive();
     }
 
-    setTimeout(createPanel, 1000);
+    // 若通过 #history-manager 打开，则渲染独立历史管理页；否则显示右侧面板
+    if (location.hash === '#history-manager') {
+        initHistoryManagerPage();
+    } else {
+        setTimeout(createPanel, 1000);
+    }
 })();
