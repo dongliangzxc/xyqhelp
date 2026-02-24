@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CBG 捡漏助手 v3.8 (导入导出)
 // @namespace    http://tampermonkey.net/
-// @version      3.8.0
+// @version      3.8.1
 // @description  召唤兽历史记录对比 + 一键保存/读取搜索筛选条件（修复服务器、宝宝、等级按钮不生效问题）。
 // @author       YourName
 // @match        *://*.cbg.163.com/*
@@ -731,36 +731,51 @@
     function tryParseDetailPageAndUpdate() {
         const m = location.search.match(/eid=([^&]+)/);
         if (!m) return null;
-        const eid = decodeURIComponent(m[1]);
-        const bodyText = document.body?.innerText || '';
-        const statusMatch = bodyText.match(/状态[：:]\s*([^\n\r]+)/);
-        const priceMatch = bodyText.match(/价格[：:]\s*[¥]?\s*([\d.]+)/);
-        const statusText = (statusMatch && statusMatch[1] || '').trim();
-        const priceVal = priceMatch ? parseFloat(priceMatch[1]) : null;
+        const eid = decodeURIComponent(m[1]).trim();
+        const bodyText = (document.body?.innerText || document.body?.textContent || '').replace(/\s+/g, ' ');
+        const bodyHtml = document.body?.innerHTML || '';
 
+        // 解析状态：优先用「状态：xxx」格式，否则直接搜索关键词（应对动态加载、不同 DOM 结构）
+        let statusText = (bodyText.match(/状态[：:]\s*([^\n\r]+)/) || [])[1] || '';
         let newStatus = null;
-        if (/买家取走|已售|已卖出|已成交/.test(statusText)) newStatus = 'sold';
-        else if (/已下架/.test(statusText)) newStatus = 'offline';
-        else if (/在售|出售中/.test(statusText)) newStatus = 'alive';
+        if (/买家取走|已售|已卖出|已成交/.test(statusText) || /买家取走|已售|已卖出|已成交/.test(bodyText)) newStatus = 'sold';
+        else if (/已下架/.test(statusText) || /已下架/.test(bodyText)) newStatus = 'offline';
+        else if (/在售|出售中/.test(statusText) || /在售|出售中/.test(bodyText)) newStatus = 'alive';
+
+        // 解析价格：支持 价格：¥68.00 或 价格：68 等格式
+        let priceVal = null;
+        const priceMatch = bodyText.match(/价格[：:]\s*[¥]?\s*([\d.]+)/) || bodyHtml.match(/价格[：:][^<]*?([\d.]+)/);
+        if (priceMatch) priceVal = parseFloat(priceMatch[1]);
 
         const history = getHistory();
-        if (!history[eid]) return null;
-        const old = history[eid];
+        let old = history[eid];
+        let updateKey = eid;
+        if (!old) {
+            const eidBase = eid.split(/[?&#]/)[0];
+            for (const [id, item] of Object.entries(history)) {
+                if (id === eid || id === eidBase || (item.link && (item.link.includes(eid) || item.link.includes(eidBase)))) {
+                    old = item;
+                    updateKey = id;
+                    break;
+                }
+            }
+        }
+        if (!old) return null;
 
         if (newStatus === 'sold') {
-            history[eid] = { ...old, manualStatus: 'sold', soldPrice: priceVal != null ? priceVal : old.soldPrice };
+            history[updateKey] = { ...old, manualStatus: 'sold', soldPrice: priceVal != null ? priceVal : old.soldPrice };
             saveHistory(history);
             return { eid, status: 'sold', price: priceVal };
         }
         if (newStatus === 'offline') {
-            history[eid] = { ...old, manualStatus: 'offline' };
-            delete history[eid].soldPrice;
+            history[updateKey] = { ...old, manualStatus: 'offline' };
+            delete history[updateKey].soldPrice;
             saveHistory(history);
             return { eid, status: 'offline' };
         }
         if (newStatus === 'alive') {
-            history[eid] = { ...old, manualStatus: 'alive' };
-            delete history[eid].soldPrice;
+            history[updateKey] = { ...old, manualStatus: 'alive' };
+            delete history[updateKey].soldPrice;
             saveHistory(history);
             return { eid, status: 'alive' };
         }
@@ -1028,8 +1043,40 @@
         };
         if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run);
         else run();
-        setTimeout(run, 2000); // 动态内容可能延迟加载
-        setTimeout(run, 4000);
+        [2000, 4000, 6000, 8000].forEach(ms => setTimeout(run, ms)); // 动态内容可能延迟加载
+        // 监听 DOM 变化，内容可能通过 AJAX 动态插入
+        const startObs = () => {
+            if (!document.body || toastShown) return;
+            let t;
+            const obs = new MutationObserver(() => {
+                if (toastShown) return;
+                clearTimeout(t);
+                t = setTimeout(run, 300); // 防抖
+            });
+            obs.observe(document.body, { childList: true, subtree: true });
+            setTimeout(() => obs.disconnect(), 12000);
+        };
+        if (document.body) startObs();
+        else document.addEventListener('DOMContentLoaded', startObs);
+        // 详情页增加「同步到历史」按钮，自动失败时可手动触发
+        const addSyncBtn = () => {
+            if (document.getElementById('cbg-detail-sync-btn')) return;
+            const btn = document.createElement('button');
+            btn.id = 'cbg-detail-sync-btn';
+            btn.textContent = '同步到历史';
+            btn.style.cssText = 'position:fixed;bottom:80px;right:20px;z-index:9999;padding:8px 14px;border-radius:6px;background:#17a2b8;color:#fff;border:none;cursor:pointer;font-size:13px;font-family:Microsoft YaHei,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,0.2)';
+            btn.onclick = () => {
+                const r = tryParseDetailPageAndUpdate();
+                if (r) {
+                    if (r.status === 'sold') showToast(r.price != null ? `已同步：已卖掉，成交价 ¥${r.price}` : '已同步：已卖掉');
+                    else if (r.status === 'offline') showToast('已同步：已下架');
+                    else if (r.status === 'alive') showToast('已同步：仍在售');
+                } else showToast('未找到历史记录或无法解析状态');
+            };
+            document.body.appendChild(btn);
+        };
+        if (document.body) addSyncBtn();
+        else document.addEventListener('DOMContentLoaded', addSyncBtn);
     } else {
         setTimeout(createPanel, 1000);
     }
