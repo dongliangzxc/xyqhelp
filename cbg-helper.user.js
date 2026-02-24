@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CBG 捡漏助手 v3.8 (导入导出)
 // @namespace    http://tampermonkey.net/
-// @version      3.8.1
+// @version      3.8.2
 // @description  召唤兽历史记录对比 + 一键保存/读取搜索筛选条件（修复服务器、宝宝、等级按钮不生效问题）。
 // @author       YourName
 // @match        *://*.cbg.163.com/*
@@ -739,7 +739,7 @@
         let statusText = (bodyText.match(/状态[：:]\s*([^\n\r]+)/) || [])[1] || '';
         let newStatus = null;
         if (/买家取走|已售|已卖出|已成交/.test(statusText) || /买家取走|已售|已卖出|已成交/.test(bodyText)) newStatus = 'sold';
-        else if (/已下架/.test(statusText) || /已下架/.test(bodyText)) newStatus = 'offline';
+        else if (/已下架|已取回|未上架/.test(statusText) || /已下架|已取回|未上架/.test(bodyText)) newStatus = 'offline';
         else if (/在售|出售中/.test(statusText) || /在售|出售中/.test(bodyText)) newStatus = 'alive';
 
         // 解析价格：支持 价格：¥68.00 或 价格：68 等格式
@@ -869,6 +869,7 @@
         }
 
         function doRender() {
+            if (!document.getElementById('hm-tbody')) return;
             const history = getHistory();
             let items = Object.values(history);
             const latestBatch = Math.max(0, ...items.map(i => i.scanBatch || 0));
@@ -966,7 +967,15 @@
         document.body.insertAdjacentHTML('beforeend', modalHtml);
 
         const modal = document.getElementById('cbg-history-manager-modal');
-        const closeModal = () => modal.remove();
+        const onHistoryUpdated = () => { if (document.getElementById('cbg-history-manager-modal')) doRender(); };
+        const storageHandler = (e) => { if (e.key === HISTORY_KEY) onHistoryUpdated(); };
+        window.addEventListener('storage', storageHandler);
+        window.addEventListener('focus', onHistoryUpdated);
+        const closeModal = () => {
+            modal.remove();
+            window.removeEventListener('storage', storageHandler);
+            window.removeEventListener('focus', onHistoryUpdated);
+        };
         modal.addEventListener('click', (e) => {
             if (e.target.id === 'cbg-history-manager-modal' || e.target.id === 'hm-close') closeModal();
         });
@@ -980,7 +989,12 @@
         modal.addEventListener('click', (e) => {
             const t = e.target;
             if (!t.dataset || !t.dataset.id) return;
-            if (t.classList.contains('hm-btn-sold')) { updateItemManualStatus(t.dataset.id, 'sold'); doRender(); }
+            if (t.classList.contains('hm-btn-sold')) {
+                const priceStr = prompt('请输入成交价（可选，直接回车跳过）', '');
+                const soldPrice = priceStr ? parseFloat(priceStr) : null;
+                updateItemManualStatus(t.dataset.id, 'sold', isNaN(soldPrice) ? null : soldPrice);
+                doRender();
+            }
             else if (t.classList.contains('hm-btn-alive')) { updateItemManualStatus(t.dataset.id, 'alive'); doRender(); }
             else if (t.classList.contains('hm-btn-clear')) { updateItemManualStatus(t.dataset.id, null); doRender(); }
             else if (t.classList.contains('hm-btn-del')) { if (confirm('确定删除该条记录？')) { deleteItem(t.dataset.id); doRender(); } }
