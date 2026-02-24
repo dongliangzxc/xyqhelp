@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CBG 捡漏助手 v3.6 (历史管理页)
 // @namespace    http://tampermonkey.net/
-// @version      3.6.0
+// @version      3.6.1
 // @description  召唤兽历史记录对比 + 一键保存/读取搜索筛选条件（修复服务器、宝宝、等级按钮不生效问题）。
 // @author       YourName
 // @match        *://*.cbg.163.com/*
@@ -62,6 +62,12 @@
         .col-price { color: #d9534f; font-weight: bold; font-size: 14px; }
         .col-skills { font-weight: bold; color: #333; }
         .new-tag-badge { background: #ff0000; color: #fff; padding: 2px 5px; border-radius: 4px; font-size: 12px; margin-left: 5px; font-weight: normal;}
+        .hm-btn { padding: 4px 8px; margin-right: 4px; border: 1px solid #ddd; border-radius: 4px; cursor: pointer; font-size: 11px; background: #fff; display: inline-block; }
+        .hm-btn:hover { background: #eee; }
+        .hm-btn-sold { color: #d9534f; border-color: #d9534f; }
+        .hm-btn-alive { color: #28a745; border-color: #28a745; }
+        .hm-btn-link { text-decoration: none; color: #007bff; }
+        .hm-table .col-price { color: #d9534f; font-weight: bold; }
     `;
     document.head.appendChild(style);
 
@@ -561,7 +567,8 @@
                     if(priceArea) {
                         const badge = document.createElement('span');
                         badge.className = 'new-tag-badge';
-                        badge.innerText = '价变';
+                        badge.innerText = '上次 ¥' + old.price;
+                        badge.title = '上次看到的价格';
                         priceArea.appendChild(badge);
                     }
 
@@ -717,21 +724,24 @@
         saveHistory(history);
     }
 
-    function openHistoryManager() {
-        const url = location.href.split('#')[0] + '#history-manager';
-        window.open(url, '_blank', 'width=1200,height=800');
-    }
+    // ==========================================
+    // 历史管理弹窗（与历史库一样，弹窗展示，方便切回）
+    // ==========================================
+    function showHistoryManagerModal() {
+        const oldModal = document.getElementById('cbg-history-manager-modal');
+        if (oldModal) { oldModal.remove(); return; }
 
-    // ==========================================
-    // 独立历史管理页（通过 #history-manager 打开）
-    // ==========================================
-    function initHistoryManagerPage() {
         function computeAutoStatus(item, latestBatch, nowTs) {
             const batch = item.scanBatch || 0;
-            const lastScanTs = (item.lastScannedAt || item.lastSeen) ? Date.parse(item.lastScannedAt || item.lastSeen) : 0;
+            const raw = item.lastScannedAt || item.lastSeen;
+            let lastScanTs = 0;
+            if (raw) { const t = Date.parse(raw); if (!isNaN(t)) lastScanTs = t; }
+            // 优先按时间判断：超过阈值未刷到 → 可能已下线
+            if (lastScanTs > 0 && (nowTs - lastScanTs) > OFFLINE_THRESHOLD_MS) {
+                return { text: '可能已下线', color: '#d9534f', key: 'offline' };
+            }
             if (batch && latestBatch) {
                 if (batch === latestBatch) return { text: '本批已刷到', color: '#28a745', key: 'current' };
-                if (lastScanTs && (nowTs - lastScanTs) > OFFLINE_THRESHOLD_MS) return { text: '可能已下线', color: '#d9534f', key: 'offline' };
                 return { text: '历史批次（需验证）', color: '#f0ad4e', key: 'old' };
             }
             return { text: '状态未知', color: '#999', key: 'unknown' };
@@ -790,69 +800,55 @@
             document.getElementById('hm-count').textContent = `共 ${items.length} 条`;
         }
 
-        document.body.innerHTML = '';
-        const wrap = document.createElement('div');
-        wrap.innerHTML = `
-<style>
-.hm-header{background:#333;color:#fff;padding:12px 20px;display:flex;justify-content:space-between;align-items:center}
-.hm-header h1{margin:0;font-size:18px}
-.hm-back{color:#fff;text-decoration:none;padding:6px 12px;background:#555;border-radius:4px}
-.hm-filters{background:#fff;padding:12px 20px;margin-bottom:10px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
-.hm-filters label{display:flex;align-items:center;gap:6px}
-.hm-filters select{padding:6px 10px;border:1px solid #ccc;border-radius:4px}
-.hm-filters input{padding:6px 12px;width:180px;border:1px solid #ccc;border-radius:4px}
-.hm-content{margin:0 20px 20px;background:#fff;border-radius:8px;overflow:auto;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
-.hm-table{width:100%;border-collapse:collapse;font-size:12px}
-.hm-table th{background:#f2f2f2;padding:10px 8px;text-align:left;border-bottom:2px solid #ddd;position:sticky;top:0}
-.hm-table td{padding:8px;border-bottom:1px solid #eee}
-.hm-table tr:hover{background:#f9f9f9}
-.hm-table .col-price{color:#d9534f;font-weight:bold}
-.hm-btn{padding:4px 8px;margin-right:4px;border:1px solid #ddd;border-radius:4px;cursor:pointer;font-size:11px;background:#fff;display:inline-block}
-.hm-btn:hover{background:#eee}
-.hm-btn-sold{color:#d9534f;border-color:#d9534f}
-.hm-btn-alive{color:#28a745;border-color:#28a745}
-.hm-btn-link{text-decoration:none;color:#007bff}
-</style>
-<div class="hm-header">
-    <h1>📦 CBG 召唤兽历史管理</h1>
-    <div>
-        <span id="hm-count">加载中...</span>
-        <a href="javascript:history.back()" class="hm-back">← 返回</a>
+        const modalHtml = `
+<div id="cbg-history-manager-modal" style="position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:100001;display:flex;justify-content:center;align-items:center;">
+    <div style="background:#fff;width:95%;max-width:1100px;height:90%;border-radius:8px;display:flex;flex-direction:column;box-shadow:0 5px 15px rgba(0,0,0,0.3);overflow:hidden;">
+        <div class="hm-header" style="background:#333;color:#fff;padding:12px 20px;display:flex;justify-content:space-between;align-items:center;flex-shrink:0">
+            <h1 style="margin:0;font-size:18px">📦 CBG 召唤兽历史管理</h1>
+            <div>
+                <span id="hm-count">加载中...</span>
+                <span id="hm-close" style="margin-left:15px;cursor:pointer;font-size:24px;color:#fff">&times;</span>
+            </div>
+        </div>
+        <div class="hm-filters" style="background:#fff;padding:12px 20px;display:flex;gap:16px;align-items:center;flex-wrap:wrap;border-bottom:1px solid #eee">
+            <label style="display:flex;align-items:center;gap:6px">自动状态: <select id="hm-filter-auto" style="padding:6px 10px;border:1px solid #ccc;border-radius:4px">
+                <option value="all">全部</option>
+                <option value="current">本批已刷到</option>
+                <option value="old">历史批次（需验证）</option>
+                <option value="offline">可能已下线</option>
+                <option value="unknown">状态未知</option>
+            </select></label>
+            <label style="display:flex;align-items:center;gap:6px">手动标记: <select id="hm-filter-manual" style="padding:6px 10px;border:1px solid #ccc;border-radius:4px">
+                <option value="all">全部</option>
+                <option value="untreated">未处理</option>
+                <option value="sold">已确认卖掉</option>
+                <option value="alive">已确认还在</option>
+            </select></label>
+            <label style="display:flex;align-items:center;gap:6px">搜索: <input type="text" id="hm-search" placeholder="名称或链接关键字" style="padding:6px 12px;width:180px;border:1px solid #ccc;border-radius:4px"></label>
+            <button class="hm-btn" id="hm-apply" style="padding:4px 12px;border:1px solid #ddd;border-radius:4px;cursor:pointer;background:#fff">应用筛选</button>
+        </div>
+        <div class="hm-content" style="flex:1;overflow:auto;padding:0">
+            <table class="hm-table" style="width:100%;border-collapse:collapse;font-size:12px">
+                <thead>
+                    <tr><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">#</th><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">名称</th><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">价格</th><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">资质/成长</th><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">技能数</th><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">自动状态</th><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">手动标记</th><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">操作</th></tr>
+                </thead>
+                <tbody id="hm-tbody"></tbody>
+            </table>
+        </div>
     </div>
-</div>
-<div class="hm-filters">
-    <label>自动状态: <select id="hm-filter-auto">
-        <option value="all">全部</option>
-        <option value="current">本批已刷到</option>
-        <option value="old">历史批次（需验证）</option>
-        <option value="offline">可能已下线</option>
-    </select></label>
-    <label>手动标记: <select id="hm-filter-manual">
-        <option value="all">全部</option>
-        <option value="untreated">未处理</option>
-        <option value="sold">已确认卖掉</option>
-        <option value="alive">已确认还在</option>
-    </select></label>
-    <label>搜索: <input type="text" id="hm-search" placeholder="名称或链接关键字"></label>
-    <button class="hm-btn" id="hm-apply">应用筛选</button>
-</div>
-<div class="hm-content">
-    <table class="hm-table">
-        <thead>
-            <tr>
-                <th>#</th><th>名称</th><th>价格</th><th>资质/成长</th><th>技能数</th><th>自动状态</th><th>手动标记</th><th>操作</th>
-            </tr>
-        </thead>
-        <tbody id="hm-tbody"></tbody>
-    </table>
 </div>`;
-        document.body.appendChild(wrap);
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
 
+        const modal = document.getElementById('cbg-history-manager-modal');
+        const closeModal = () => modal.remove();
+        modal.addEventListener('click', (e) => {
+            if (e.target.id === 'cbg-history-manager-modal' || e.target.id === 'hm-close') closeModal();
+        });
         document.getElementById('hm-filter-auto').addEventListener('change', doRender);
         document.getElementById('hm-filter-manual').addEventListener('change', doRender);
         document.getElementById('hm-search').addEventListener('input', () => { clearTimeout(window._hmT); window._hmT = setTimeout(doRender, 200); });
         document.getElementById('hm-apply').addEventListener('click', doRender);
-        document.addEventListener('click', (e) => {
+        modal.addEventListener('click', (e) => {
             const t = e.target;
             if (!t.dataset || !t.dataset.id) return;
             if (t.classList.contains('hm-btn-sold')) { updateItemManualStatus(t.dataset.id, 'sold'); doRender(); }
@@ -870,7 +866,7 @@
             <h3>🐶 召唤兽助手 v3.6</h3>
             <button id="btn-scan" class="cbg-btn btn-scan">🔍 扫描当前页</button>
             <button id="btn-view" class="cbg-btn btn-view">📜 查看历史库</button>
-            <button id="btn-history-mgr" class="cbg-btn btn-view">📑 打开历史管理页</button>
+            <button id="btn-history-mgr" class="cbg-btn btn-view">📑 历史管理</button>
             <button id="btn-clear" class="cbg-btn btn-clear">🗑️ 清空历史</button>
 
             <h3>💾 筛选方案管理</h3>
@@ -884,7 +880,7 @@
 
         document.getElementById('btn-scan').addEventListener('click', runScan);
         document.getElementById('btn-view').addEventListener('click', showHistory);
-        document.getElementById('btn-history-mgr').addEventListener('click', openHistoryManager);
+        document.getElementById('btn-history-mgr').addEventListener('click', showHistoryManagerModal);
         document.getElementById('btn-clear').addEventListener('click', clearHistory);
         document.getElementById('btn-save-config').addEventListener('click', saveCurrentConfig);
         document.getElementById('btn-reset-filters').addEventListener('click', resetCurrentFilters);
@@ -904,10 +900,5 @@
         startKeepAlive();
     }
 
-    // 若通过 #history-manager 打开，则渲染独立历史管理页；否则显示右侧面板
-    if (location.hash === '#history-manager') {
-        initHistoryManagerPage();
-    } else {
-        setTimeout(createPanel, 1000);
-    }
+    setTimeout(createPanel, 1000);
 })();
