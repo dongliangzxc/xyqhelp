@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CBG 捡漏助手 v3.8 (导入导出)
 // @namespace    http://tampermonkey.net/
-// @version      3.8.5
+// @version      3.9.2
 // @description  召唤兽历史记录对比 + 一键保存/读取搜索筛选条件（修复服务器、宝宝、等级按钮不生效问题）。
 // @author       YourName
 // @match        *://*.cbg.163.com/*
@@ -16,6 +16,7 @@
     'use strict';
 
     // --- 配置常量 ---
+    // localStorage 约 5MB（Chrome/Firefox），单条 ~0.5-1KB，约 5000 条。超量可考虑 IndexedDB 迁移
     const HISTORY_KEY = 'cbg_pet_history_v3';
     const CONFIG_KEY = 'cbg_search_configs';
     const HIGHLIGHT_COLOR = '#fff3cd';
@@ -493,6 +494,7 @@
         let chengzhang = "-";
         let skillNum = 0;
 
+        let skills = [];
         const textArea = row.querySelector('textarea');
         if (textArea) {
             try {
@@ -503,7 +505,28 @@
                     if (match && match[1]) gongzi = match[1];
                 }
                 if (rawData.skill_num) skillNum = rawData.skill_num;
+                // 解析技能名：尝试多种常见结构
+                if (Array.isArray(rawData.pet_skill)) {
+                    skills = rawData.pet_skill.map(s => s.name || s.skill_name || s).filter(Boolean);
+                } else if (Array.isArray(rawData.skill_list)) {
+                    skills = rawData.skill_list.map(s => typeof s === 'object' ? (s.name || s.skill_name) : s).filter(Boolean);
+                } else if (typeof rawData.skill === 'string') {
+                    skills = rawData.skill.split(/[,，、]/).map(s => s.trim()).filter(Boolean);
+                } else if (rawData.skills && Array.isArray(rawData.skills)) {
+                    skills = rawData.skills.map(s => typeof s === 'object' ? (s.name || s.skill_name) : s).filter(Boolean);
+                }
+                if (skills.length === 0 && rawData.desc) {
+                    const skillMatch = rawData.desc.match(/skill_name\\?":\\?"([^"]+)/g);
+                    if (skillMatch) skills = skillMatch.map(m => (m.match(/"([^"]+)$/) || [])[1]).filter(Boolean);
+                }
             } catch (e) { console.error("JSON解析失败", e); }
+        }
+        if (skills.length === 0) {
+            const skillEls = row.querySelectorAll('[data-skill_name], .skill-name, .pet-skill-name');
+            skillEls.forEach(el => {
+                const n = el.getAttribute('data-skill_name') || el.textContent?.trim();
+                if (n) skills.push(n);
+            });
         }
 
         return {
@@ -513,9 +536,52 @@
             gongzi,
             chengzhang,
             skillNum: skillNum,
+            skills: skills.length ? skills : null,
             link,
+            serverid: serverid || null,
             lastSeen: new Date().toLocaleString()
         };
+    }
+
+    /** 检测当前列表是否按「价格从低到高」排序。返回 'price_asc' | 'price_desc' | 'unknown' */
+    function detectSortOrder(pricesFromPage) {
+        const q = new URLSearchParams(location.search);
+        const order = (q.get('order') || q.get('sort') || q.get('order_by') || '').toLowerCase();
+        if (/price_asc|priceasc|asc|低价|升序/.test(order)) return 'price_asc';
+        if (/price_desc|pricedesc|desc|高价|降序/.test(order)) return 'price_desc';
+
+        // DOM：表头「价格↑」= 价格从低到高，「价格↓」= 价格从高到低（CBG 表头排序链接）
+        const priceLink = [...document.querySelectorAll('th a, th, a[data_attr_name="price"]')].find(n =>
+            n.textContent && /价格\s*↑/.test(n.textContent.trim())
+        );
+        if (priceLink) return 'price_asc';
+        const priceDescLink = [...document.querySelectorAll('th a, th, a[data_attr_name="price"]')].find(n =>
+            n.textContent && /价格\s*↓/.test(n.textContent.trim())
+        );
+        if (priceDescLink) return 'price_desc';
+
+        // DOM：其他排序控件中「价格从低到高」是否被选中
+        const sortTexts = ['价格从低到高', '价格升序', '低价优先', '价格从低到高排序'];
+        for (const txt of sortTexts) {
+            const el = [...document.querySelectorAll('a, span, li, .sort-item, [class*="sort"]')].find(n =>
+                n.textContent && n.textContent.trim().includes(txt) &&
+                (n.classList.contains('active') || n.classList.contains('cur') || n.classList.contains('on') || n.classList.contains('selected'))
+            );
+            if (el) return 'price_asc';
+        }
+
+        // 数据启发式：用本页价格判断（至少 3 条才有参考价值）
+        if (Array.isArray(pricesFromPage) && pricesFromPage.length >= 3) {
+            let asc = true, desc = true;
+            for (let i = 1; i < pricesFromPage.length; i++) {
+                const a = pricesFromPage[i - 1], b = pricesFromPage[i];
+                if (a > b) asc = false;
+                if (a < b) desc = false;
+            }
+            if (asc && !desc) return 'price_asc';
+            if (desc && !asc) return 'price_desc';
+        }
+        return 'unknown';
     }
 
     function runScan() {
@@ -544,26 +610,45 @@
             return;
         }
 
-        // 先收集本页所有 id，用于「同批未刷到」检测
+        // 先收集本页所有 id、最高价、价格序列，用于「同批未刷到」检测及排序判断
         const currentScanIds = new Set();
+        let maxPriceOnPage = 0;
+        const pricesOnPage = [];
         rows.forEach(row => {
             const d = parsePetRow(row);
-            if (d) currentScanIds.add(d.id);
+            if (d) {
+                currentScanIds.add(d.id);
+                if (typeof d.price === 'number') {
+                    if (d.price > maxPriceOnPage) maxPriceOnPage = d.price;
+                    pricesOnPage.push(d.price);
+                }
+            }
         });
 
+        // 排序检测：若非「价格从低到高」，提示用户手动切换
+        const sortOrder = detectSortOrder(pricesOnPage);
+        if (sortOrder !== 'price_asc') {
+            const msg = sortOrder === 'price_desc'
+                ? '⚠️ 当前为「价格从高到低」，建议切到「价格从低到高」再扫描'
+                : '⚠️ 当前可能非「价格从低到高」，建议手动切换后再扫描';
+            showToast(msg);
+        }
+
         // 同批未刷到：与当前页多数同批的，但本页没刷到 → 大概率已售/下架
+        // 排除：若缺失项价格高于本页最高价，说明可能被低价挤到下一页，不标记
         let inferredCount = 0;
         Object.keys(history).forEach(id => {
             if (currentScanIds.has(id)) return;
             const item = history[id];
             const batch = item.scanBatch || 0;
             if (!batch) return;
+            if (maxPriceOnPage > 0 && typeof item.price === 'number' && item.price > maxPriceOnPage) return; // 价格高于本页最高，可能在下页
             let coCount = 0;
             currentScanIds.forEach(cid => {
                 if ((history[cid] || {}).scanBatch === batch) coCount++;
             });
             if (coCount >= CO_BATCH_THRESHOLD) {
-                history[id] = { ...item, inferredOffline: true };
+                history[id] = { ...item, inferredOffline: true, inferredOfflineAt: new Date().toLocaleDateString() };
                 inferredCount++;
             }
         });
@@ -597,6 +682,7 @@
                 history[data.id] = {
                     ...data,
                     firstSeen: now,
+                    firstSeenDate: new Date().toLocaleDateString(),
                     lastSeen: now,
                     lastPriceChange: now,
                     lastScannedAt: now,
@@ -635,7 +721,9 @@
                         gongzi: data.gongzi,
                         chengzhang: data.chengzhang,
                         skillNum: data.skillNum,
+                        skills: data.skills ?? old.skills,
                         link: data.link,
+                        serverid: data.serverid ?? old.serverid,
                         lastScannedAt: now,
                         scanBatch: currentBatch
                     };
@@ -647,7 +735,10 @@
         const total = Object.keys(history).length;
         let statusMsg = `本次扫描: 新增 <b style="color:red">${newCount}</b> | 价格变动 <b style="color:#d9534f">${priceChangeCount}</b>`;
         if (inferredCount) statusMsg += ` | 同批未刷到 <b style="color:#dc3545">${inferredCount}</b>`;
-        statusDiv.innerHTML = statusMsg + ` | 已记录 ${total}`;
+        statusMsg += ` | 已记录 ${total}`;
+        if (sortOrder !== 'price_asc') statusMsg += `<br><span style="color:#d9534f">${sortOrder === 'price_desc' ? '当前为价格从高到低' : '当前可能非价格从低到高'}，建议手动切换</span>`;
+        statusDiv.innerHTML = statusMsg;
+        refreshDailyStats();
     }
 
     function _removed_showHistory() {
@@ -770,8 +861,13 @@
         const history = getHistory();
         if (!history[id]) return;
         history[id].manualStatus = status || null;
-        if (status === 'sold' && soldPrice != null) history[id].soldPrice = soldPrice;
-        if (status !== 'sold') delete history[id].soldPrice;
+        if (status === 'sold') {
+            if (soldPrice != null) history[id].soldPrice = soldPrice;
+            history[id].soldAt = new Date().toLocaleDateString();
+        } else {
+            delete history[id].soldPrice;
+            delete history[id].soldAt;
+        }
         saveHistory(history);
     }
 
@@ -817,7 +913,7 @@
         if (!old) return null;
 
         if (newStatus === 'sold') {
-            history[updateKey] = { ...old, manualStatus: 'sold', soldPrice: priceVal != null ? priceVal : old.soldPrice };
+            history[updateKey] = { ...old, manualStatus: 'sold', soldPrice: priceVal != null ? priceVal : old.soldPrice, soldAt: new Date().toLocaleDateString() };
             saveHistory(history);
             return { eid, status: 'sold', price: priceVal };
         }
@@ -936,8 +1032,11 @@
             const filterAuto = document.getElementById('hm-filter-auto').value;
             const filterManual = document.getElementById('hm-filter-manual').value;
             const keyword = (document.getElementById('hm-search').value || '').trim().toLowerCase();
+            const filterServer = document.getElementById('hm-filter-server')?.checked;
+            const currentServerId = (location.search.match(/[?&]s=([^&]+)/) || [])[1];
 
             items = items.filter(item => {
+                if (filterServer && currentServerId && item.serverid != null && String(item.serverid) !== String(currentServerId)) return false;
                 const auto = computeAutoStatus(item, latestBatch, nowTs);
                 if (filterAuto && filterAuto !== 'all' && auto.key !== filterAuto) return false;
                 const m = item.manualStatus || '';
@@ -945,7 +1044,13 @@
                 if (filterManual === 'sold' && m !== 'sold') return false;
                 if (filterManual === 'alive' && m !== 'alive') return false;
                 if (filterManual === 'offline' && m !== 'offline') return false;
-                if (keyword && !(item.name || '').toLowerCase().includes(keyword) && !(item.link || '').toLowerCase().includes(keyword)) return false;
+                if (keyword) {
+                    const kw = keyword.toLowerCase();
+                    const nameMatch = (item.name || '').toLowerCase().includes(kw);
+                    const linkMatch = (item.link || '').toLowerCase().includes(kw);
+                    const skillMatch = Array.isArray(item.skills) && item.skills.some(s => (s || '').toLowerCase().includes(kw));
+                    if (!nameMatch && !linkMatch && !skillMatch) return false;
+                }
                 return true;
             });
 
@@ -966,7 +1071,7 @@
                     <td><a href="${item.link}" target="_blank" style="font-weight:bold;color:#007bff">${esc(item.name)}</a></td>
                     <td class="col-price">${priceStr}</td>
                     <td>攻: ${esc(item.gongzi)} / 成: ${esc(item.chengzhang)}</td>
-                    <td>${esc(item.skillNum)} 技能</td>
+                    <td>${esc(item.skillNum)} 技能${item.skills && item.skills.length ? '<br><span style="font-size:10px;color:#666">' + esc(item.skills.slice(0,5).join(' ')) + (item.skills.length > 5 ? '…' : '') + '</span>' : ''}</td>
                     <td><span style="color:${auto.color}">${auto.text}</span></td>
                     <td><span style="color:${manualColor}">${manualText}</span></td>
                     <td>
@@ -1010,7 +1115,8 @@
                 <option value="alive">已确认还在</option>
                 <option value="offline">已下架</option>
             </select></label>
-            <label style="display:flex;align-items:center;gap:6px">搜索: <input type="text" id="hm-search" placeholder="名称或链接关键字" style="padding:6px 12px;width:180px;border:1px solid #ccc;border-radius:4px"></label>
+            <label style="display:flex;align-items:center;gap:6px">搜索: <input type="text" id="hm-search" placeholder="名称/链接/技能" style="padding:6px 12px;width:180px;border:1px solid #ccc;border-radius:4px"></label>
+            <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="hm-filter-server" title="仅显示当前页面服务器"> 本服</label>
             <button class="hm-btn" id="hm-apply" style="padding:4px 12px;border:1px solid #ddd;border-radius:4px;cursor:pointer;background:#fff">应用筛选</button>
             <span style="font-size:11px;color:#999;margin-left:8px">「同批未刷到」= 同页其他刷到了就它没刷到，大概率已售/下架；「近期未刷到」= 超时未刷到，可能因未搜该类目</span>
         </div>
@@ -1027,7 +1133,7 @@
         document.body.insertAdjacentHTML('beforeend', modalHtml);
 
         const modal = document.getElementById('cbg-history-manager-modal');
-        const onHistoryUpdated = () => { if (document.getElementById('cbg-history-manager-modal')) doRender(); };
+        const onHistoryUpdated = () => { if (document.getElementById('cbg-history-manager-modal')) doRender(); refreshDailyStats(); };
         const storageHandler = (e) => { if (e.key === HISTORY_KEY) onHistoryUpdated(); };
         window.addEventListener('storage', storageHandler);
         window.addEventListener('focus', onHistoryUpdated);
@@ -1041,11 +1147,12 @@
         });
         document.getElementById('hm-filter-auto').addEventListener('change', doRender);
         document.getElementById('hm-filter-manual').addEventListener('change', doRender);
+        document.getElementById('hm-filter-server').addEventListener('change', doRender);
         document.getElementById('hm-search').addEventListener('input', () => { clearTimeout(window._hmT); window._hmT = setTimeout(doRender, 200); });
         document.getElementById('hm-apply').addEventListener('click', doRender);
         document.getElementById('hm-export').addEventListener('click', exportHistory);
         document.getElementById('hm-import').addEventListener('click', importHistory);
-        modal.addEventListener('hm-import-done', doRender);
+        modal.addEventListener('hm-import-done', () => { doRender(); refreshDailyStats(); });
         modal.addEventListener('click', (e) => {
             const t = e.target;
             if (!t.dataset || !t.dataset.id) return;
@@ -1053,21 +1160,57 @@
                 const priceStr = prompt('请输入成交价（可选，直接回车跳过）', '');
                 const soldPrice = priceStr ? parseFloat(priceStr) : null;
                 updateItemManualStatus(t.dataset.id, 'sold', isNaN(soldPrice) ? null : soldPrice);
-                doRender();
+                doRender(); refreshDailyStats();
             }
-            else if (t.classList.contains('hm-btn-alive')) { updateItemManualStatus(t.dataset.id, 'alive'); doRender(); }
-            else if (t.classList.contains('hm-btn-clear')) { updateItemManualStatus(t.dataset.id, null); doRender(); }
-            else if (t.classList.contains('hm-btn-del')) { if (confirm('确定删除该条记录？')) { deleteItem(t.dataset.id); doRender(); } }
+            else if (t.classList.contains('hm-btn-alive')) { updateItemManualStatus(t.dataset.id, 'alive'); doRender(); refreshDailyStats(); }
+            else if (t.classList.contains('hm-btn-clear')) { updateItemManualStatus(t.dataset.id, null); doRender(); refreshDailyStats(); }
+            else if (t.classList.contains('hm-btn-del')) { if (confirm('确定删除该条记录？')) { deleteItem(t.dataset.id); doRender(); refreshDailyStats(); } }
         });
 
         doRender();
+    }
+
+    function getDatePart(str) {
+        if (!str) return '';
+        return String(str).trim().split(/\s/)[0] || '';
+    }
+
+    function getStorageUsage() {
+        try {
+            const raw = localStorage.getItem(HISTORY_KEY) || '{}';
+            const bytes = new Blob([raw]).size;
+            const limit = 5 * 1024 * 1024; // 5MB 典型限制
+            return { bytes, kb: (bytes / 1024).toFixed(1), mb: (bytes / 1024 / 1024).toFixed(2), pct: ((bytes / limit) * 100).toFixed(1) };
+        } catch (e) { return { bytes: 0, kb: '0', mb: '0', pct: '0' }; }
+    }
+
+    function getDailyStats() {
+        const today = new Date().toLocaleDateString();
+        const history = getHistory();
+        let todayNew = 0, todaySold = 0, todayInferred = 0;
+        Object.values(history).forEach(item => {
+            const firstDate = item.firstSeenDate || getDatePart(item.firstSeen);
+            if (firstDate === today) todayNew++;
+            if (item.manualStatus === 'sold' && (item.soldAt || '') === today) todaySold++;
+            if (item.inferredOffline && (item.inferredOfflineAt || '') === today) todayInferred++;
+        });
+        return { todayNew, todaySold, todayInferred, total: Object.keys(history).length };
+    }
+
+    function refreshDailyStats() {
+        const el = document.getElementById('cbg-daily-stats');
+        if (!el) return;
+        const s = getDailyStats();
+        const u = getStorageUsage();
+        el.innerHTML = `今日: 新增 <b>${s.todayNew}</b> | 已售 <b style="color:#d9534f">${s.todaySold}</b> | 同批未刷到 <b>${s.todayInferred}</b> | 共 ${s.total} | 存储 ${u.kb}KB`;
     }
 
     function createPanel() {
         const div = document.createElement('div');
         div.id = 'cbg-helper-panel';
         div.innerHTML = `
-            <h3>🐶 召唤兽助手 v3.8</h3>
+            <h3>🐶 召唤兽助手 v3.9</h3>
+            <div id="cbg-daily-stats" style="font-size:11px;color:#666;padding:4px 0;border-bottom:1px dashed #eee">今日: 加载中...</div>
             <button id="btn-scan" class="cbg-btn btn-scan">🔍 扫描当前页</button>
             <button id="btn-history-mgr" class="cbg-btn btn-view">📑 历史管理</button>
             <button id="btn-clear" class="cbg-btn btn-clear">🗑️ 清空历史</button>
@@ -1099,6 +1242,7 @@
         });
 
         renderConfigList();
+        refreshDailyStats();
 
         // 页面加载完成后启动会话保活
         startKeepAlive();
