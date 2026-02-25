@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CBG 捡漏助手 v3.8 (导入导出)
 // @namespace    http://tampermonkey.net/
-// @version      3.8.3
+// @version      3.8.5
 // @description  召唤兽历史记录对比 + 一键保存/读取搜索筛选条件（修复服务器、宝宝、等级按钮不生效问题）。
 // @author       YourName
 // @match        *://*.cbg.163.com/*
@@ -21,9 +21,10 @@
     const HIGHLIGHT_COLOR = '#fff3cd';
     const KEEPALIVE_INTERVAL_MS = 10 * 60 * 1000; // 保活心跳间隔：10 分钟（CBG 会话易过期，缩短间隔）
     const KEEPALIVE_MASTER_KEY = 'cbg_keepalive_master_v1'; // 用于多标签页选主
-    const OFFLINE_THRESHOLD_HOURS = 24 * 7; // 一周（168小时）未刷到则标记为"可能已下线" // 多少小时未刷到则标记为“可能已下线”（可按需修改）
+    const OFFLINE_THRESHOLD_HOURS = 24 * 7; // 一周未刷到→近期未刷到（可能已售/下架，也可能因未搜该类目） // 多少小时未刷到则标记为“可能已下线”（可按需修改）
     const OFFLINE_THRESHOLD_MS = OFFLINE_THRESHOLD_HOURS * 60 * 60 * 1000;
-    const SCAN_BATCH_KEY = 'cbg_scan_batch_v1'; // 当前扫描批次号
+    const SCAN_BATCH_KEY = 'cbg_scan_batch_v1';
+    const CO_BATCH_THRESHOLD = 3; // 同批至少 N 个仍刷到，则未刷到的标记为「同批未刷到」
 
     // --- 样式注入 ---
     const style = document.createElement('style');
@@ -543,6 +544,30 @@
             return;
         }
 
+        // 先收集本页所有 id，用于「同批未刷到」检测
+        const currentScanIds = new Set();
+        rows.forEach(row => {
+            const d = parsePetRow(row);
+            if (d) currentScanIds.add(d.id);
+        });
+
+        // 同批未刷到：与当前页多数同批的，但本页没刷到 → 大概率已售/下架
+        let inferredCount = 0;
+        Object.keys(history).forEach(id => {
+            if (currentScanIds.has(id)) return;
+            const item = history[id];
+            const batch = item.scanBatch || 0;
+            if (!batch) return;
+            let coCount = 0;
+            currentScanIds.forEach(cid => {
+                if ((history[cid] || {}).scanBatch === batch) coCount++;
+            });
+            if (coCount >= CO_BATCH_THRESHOLD) {
+                history[id] = { ...item, inferredOffline: true };
+                inferredCount++;
+            }
+        });
+
         let newCount = 0;
         let priceChangeCount = 0;
 
@@ -574,8 +599,8 @@
                     firstSeen: now,
                     lastSeen: now,
                     lastPriceChange: now,
-                    lastScannedAt: now,  // 上次在搜索结果里刷到的时间
-                    scanBatch: currentBatch, // 所属扫描批次
+                    lastScannedAt: now,
+                    scanBatch: currentBatch,
                     prevPrice: null
                 };
             } else {
@@ -594,14 +619,15 @@
 
                     history[data.id] = {
                         ...old,
-                        ...data,               // 更新名称、资质、链接等基础信息
-                        prevPrice: old.price,  // 记录旧价格
-                        price: data.price,     // 新价格
+                        ...data,
+                        prevPrice: old.price,
+                        price: data.price,
                         lastSeen: now,
                         lastPriceChange: now,
-                        lastScannedAt: now,    // 本次刷到
+                        lastScannedAt: now,
                         scanBatch: currentBatch
                     };
+                    delete history[data.id].inferredOffline;
                 } else {
                     // 价格未变：只更新非价格类字段 + 上次刷到时间
                     history[data.id] = {
@@ -610,15 +636,18 @@
                         chengzhang: data.chengzhang,
                         skillNum: data.skillNum,
                         link: data.link,
-                        lastScannedAt: now,    // 本次刷到（可能还在卖）
+                        lastScannedAt: now,
                         scanBatch: currentBatch
                     };
+                    delete history[data.id].inferredOffline;
                 }
             }
         });
         saveHistory(history);
         const total = Object.keys(history).length;
-        statusDiv.innerHTML = `本次扫描: 新增 <b style="color:red">${newCount}</b> | 价格变动 <b style="color:#d9534f">${priceChangeCount}</b> | 已记录 ${total}`;
+        let statusMsg = `本次扫描: 新增 <b style="color:red">${newCount}</b> | 价格变动 <b style="color:#d9534f">${priceChangeCount}</b>`;
+        if (inferredCount) statusMsg += ` | 同批未刷到 <b style="color:#dc3545">${inferredCount}</b>`;
+        statusDiv.innerHTML = statusMsg + ` | 已记录 ${total}`;
     }
 
     function _removed_showHistory() {
@@ -672,7 +701,7 @@
             if (lastScanTs) {
                 const diffMs = nowTs - lastScanTs;
                 if (diffMs > OFFLINE_THRESHOLD_MS) {
-                    statusText = '可能已下线';
+                    statusText = '近期未刷到';
                     statusColor = '#d9534f';
                 }
             }
@@ -748,9 +777,9 @@
 
     // 详情页自动解析状态与成交价并更新历史
     function tryParseDetailPageAndUpdate() {
-        const m = location.search.match(/eid=([^&]+)/);
-        if (!m) return null;
-        const eid = decodeURIComponent(m[1]).trim();
+        const eidMatch = location.search.match(/eid=([^&]+)/);
+        if (!eidMatch) return null;
+        const eid = decodeURIComponent(eidMatch[1]).trim();
         const bodyText = (document.body?.innerText || document.body?.textContent || '').replace(/\s+/g, ' ');
         const bodyHtml = document.body?.innerHTML || '';
 
@@ -765,8 +794,8 @@
         let priceVal = null;
         const statusIdx = Math.max(bodyText.indexOf('状态'), bodyText.indexOf('买家取走'), bodyText.indexOf('已取回'), bodyText.indexOf('卖家已取回'), 0);
         const block = bodyText.substring(statusIdx, statusIdx + 350);
-        const m = block.match(/(?:价格|成交价)[：:]\s*[¥]?\s*([\d.]+)/) || block.match(/[¥]\s*(\d+\.?\d*)/);
-        if (m) priceVal = parseFloat(m[1]);
+        const priceM = block.match(/(?:价格|成交价)[：:]\s*[¥]?\s*([\d.]+)/) || block.match(/[¥]\s*(\d+\.?\d*)/);
+        if (priceM) priceVal = parseFloat(priceM[1]);
         if (priceVal == null || isNaN(priceVal)) {
             const fb = bodyText.match(/价格[：:]\s*[¥]?\s*([\d.]+)/) || bodyHtml.match(/价格[：:][^<]*?([\d.]+)/);
             if (fb) priceVal = parseFloat(fb[1]);
@@ -882,9 +911,13 @@
             const raw = item.lastScannedAt || item.lastSeen;
             let lastScanTs = 0;
             if (raw) { const t = Date.parse(raw); if (!isNaN(t)) lastScanTs = t; }
-            // 优先按时间判断：超过阈值未刷到 → 可能已下线
+            // 同批未刷到：同页其他都刷到了就它没刷到 → 大概率已售/下架（高置信）
+            if (item.inferredOffline) {
+                return { text: '同批未刷到', color: '#dc3545', key: 'likely_offline' };
+            }
+            // 超时未刷到：可能是已售/下架，也可能因未搜该类目（低置信）
             if (lastScanTs > 0 && (nowTs - lastScanTs) > OFFLINE_THRESHOLD_MS) {
-                return { text: '可能已下线', color: '#d9534f', key: 'offline' };
+                return { text: '近期未刷到', color: '#d9534f', key: 'offline' };
             }
             if (batch && latestBatch) {
                 if (batch === latestBatch) return { text: '本批已刷到', color: '#28a745', key: 'current' };
@@ -928,7 +961,7 @@
                 const manualColor = m === 'sold' ? '#d9534f' : m === 'alive' ? '#28a745' : m === 'offline' ? '#6c757d' : '#999';
                 const esc = s => String(s || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
                 return `
-                <tr data-id="${item.id}" style="background:${auto.key === 'offline' ? '#fff5f5' : ''}">
+                <tr data-id="${item.id}" style="background:${auto.key === 'likely_offline' ? '#ffe6e6' : auto.key === 'offline' ? '#fff5f5' : ''}">
                     <td>${i + 1}</td>
                     <td><a href="${item.link}" target="_blank" style="font-weight:bold;color:#007bff">${esc(item.name)}</a></td>
                     <td class="col-price">${priceStr}</td>
@@ -962,11 +995,12 @@
             </div>
         </div>
         <div class="hm-filters" style="background:#fff;padding:12px 20px;display:flex;gap:16px;align-items:center;flex-wrap:wrap;border-bottom:1px solid #eee">
-            <label style="display:flex;align-items:center;gap:6px">自动状态: <select id="hm-filter-auto" style="padding:6px 10px;border:1px solid #ccc;border-radius:4px">
+            <label style="display:flex;align-items:center;gap:6px" title="藏宝阁为关键词搜索，近期未刷到可能是已售/下架，也可能因未搜该类目">自动状态: <select id="hm-filter-auto" style="padding:6px 10px;border:1px solid #ccc;border-radius:4px">
                 <option value="all">全部</option>
                 <option value="current">本批已刷到</option>
                 <option value="old">历史批次（需验证）</option>
-                <option value="offline">可能已下线</option>
+                <option value="likely_offline">同批未刷到（大概率已售/下架）</option>
+                <option value="offline">近期未刷到</option>
                 <option value="unknown">状态未知</option>
             </select></label>
             <label style="display:flex;align-items:center;gap:6px">手动标记: <select id="hm-filter-manual" style="padding:6px 10px;border:1px solid #ccc;border-radius:4px">
@@ -978,6 +1012,7 @@
             </select></label>
             <label style="display:flex;align-items:center;gap:6px">搜索: <input type="text" id="hm-search" placeholder="名称或链接关键字" style="padding:6px 12px;width:180px;border:1px solid #ccc;border-radius:4px"></label>
             <button class="hm-btn" id="hm-apply" style="padding:4px 12px;border:1px solid #ddd;border-radius:4px;cursor:pointer;background:#fff">应用筛选</button>
+            <span style="font-size:11px;color:#999;margin-left:8px">「同批未刷到」= 同页其他刷到了就它没刷到，大概率已售/下架；「近期未刷到」= 超时未刷到，可能因未搜该类目</span>
         </div>
         <div class="hm-content" style="flex:1;overflow:auto;padding:0">
             <table class="hm-table" style="width:100%;border-collapse:collapse;font-size:12px">
