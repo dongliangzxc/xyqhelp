@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CBG 捡漏助手 v3.8 (导入导出)
 // @namespace    http://tampermonkey.net/
-// @version      3.8.2
+// @version      3.8.3
 // @description  召唤兽历史记录对比 + 一键保存/读取搜索筛选条件（修复服务器、宝宝、等级按钮不生效问题）。
 // @author       YourName
 // @match        *://*.cbg.163.com/*
@@ -19,7 +19,7 @@
     const HISTORY_KEY = 'cbg_pet_history_v3';
     const CONFIG_KEY = 'cbg_search_configs';
     const HIGHLIGHT_COLOR = '#fff3cd';
-    const KEEPALIVE_INTERVAL_MS = 10 * 60 * 1000; // 保活心跳间隔：10 分钟
+    const KEEPALIVE_INTERVAL_MS = 10 * 60 * 1000; // 保活心跳间隔：10 分钟（CBG 会话易过期，缩短间隔）
     const KEEPALIVE_MASTER_KEY = 'cbg_keepalive_master_v1'; // 用于多标签页选主
     const OFFLINE_THRESHOLD_HOURS = 24 * 7; // 一周（168小时）未刷到则标记为"可能已下线" // 多少小时未刷到则标记为“可能已下线”（可按需修改）
     const OFFLINE_THRESHOLD_MS = OFFLINE_THRESHOLD_HOURS * 60 * 60 * 1000;
@@ -402,16 +402,18 @@
             // 抢占/续约主标签身份
             updateKeepAliveMasterStamp();
 
-            // 使用 fetch 向当前页面地址发一个轻量 GET，请求只为刷新会话，不做任何页面跳转
-            fetch(window.location.href, {
+            // 请求 cbg 主路径以刷新会话（/cbg/ 或当前页）
+            const pingUrl = (location.pathname.includes('/cbg/') && !location.pathname.includes('/equip')) ? location.href : (location.origin + '/cbg/');
+            fetch(pingUrl, {
                 method: 'GET',
                 credentials: 'include',
-                cache: 'no-store'
+                cache: 'no-store',
+                headers: { 'Accept': 'text/html' }
             }).then(() => {
                 updateKeepAliveMasterStamp(); // 成功后再续约一次时间戳
                 if (statusDiv) {
                     const t = new Date().toLocaleTimeString();
-                    statusDiv.innerHTML = `保活中：最近一次心跳 ${t}（每 ${KEEPALIVE_INTERVAL_MS / 60000} 分钟一次，仅当前标签为主时生效）`;
+                    statusDiv.innerHTML = `保活中：最近心跳 ${t}（每 ${KEEPALIVE_INTERVAL_MS / 60000} 分钟，仅主标签生效）`;
                 }
             }).catch(() => {
                 if (statusDiv) {
@@ -421,9 +423,26 @@
             });
         };
 
-        // 进入页面先尝试一次心跳，然后按固定间隔继续
-        sendPing();
-        keepAliveTimer = setInterval(sendPing, KEEPALIVE_INTERVAL_MS);
+        doKeepAlivePing();
+        keepAliveTimer = setInterval(doKeepAlivePing, KEEPALIVE_INTERVAL_MS);
+    }
+
+    function doKeepAlivePing() {
+        const statusDiv = document.getElementById('cbg-status');
+        if (!isKeepAliveMaster()) {
+            if (statusDiv) statusDiv.innerHTML = '保活：当前非主标签';
+            return;
+        }
+        updateKeepAliveMasterStamp();
+        const pingUrl = (location.pathname.includes('/cbg/') && !location.pathname.includes('/equip')) ? location.href : (location.origin + '/cbg/');
+        fetch(pingUrl, { method: 'GET', credentials: 'include', cache: 'no-store', headers: { 'Accept': 'text/html' } })
+            .then(() => {
+                updateKeepAliveMasterStamp();
+                if (statusDiv) statusDiv.innerHTML = '保活：最近心跳 ' + new Date().toLocaleTimeString() + '（每' + (KEEPALIVE_INTERVAL_MS/60000) + '分钟）';
+            })
+            .catch(() => {
+                if (statusDiv) statusDiv.innerHTML = '保活失败 ' + new Date().toLocaleTimeString();
+            });
     }
 
     function deleteConfig(configName) {
@@ -739,13 +758,19 @@
         let statusText = (bodyText.match(/状态[：:]\s*([^\n\r]+)/) || [])[1] || '';
         let newStatus = null;
         if (/买家取走|已售|已卖出|已成交/.test(statusText) || /买家取走|已售|已卖出|已成交/.test(bodyText)) newStatus = 'sold';
-        else if (/已下架|已取回|未上架/.test(statusText) || /已下架|已取回|未上架/.test(bodyText)) newStatus = 'offline';
+        else if (/已下架|已取回|未上架|卖家已取回|卖家取回/.test(statusText) || /已下架|已取回|未上架|卖家已取回|卖家取回/.test(bodyText)) newStatus = 'offline';
         else if (/在售|出售中/.test(statusText) || /在售|出售中/.test(bodyText)) newStatus = 'alive';
 
-        // 解析价格：支持 价格：¥68.00 或 价格：68 等格式
+        // 解析价格：优先找状态附近的「价格」或「成交价」（避免误匹配相似推荐）
         let priceVal = null;
-        const priceMatch = bodyText.match(/价格[：:]\s*[¥]?\s*([\d.]+)/) || bodyHtml.match(/价格[：:][^<]*?([\d.]+)/);
-        if (priceMatch) priceVal = parseFloat(priceMatch[1]);
+        const statusIdx = Math.max(bodyText.indexOf('状态'), bodyText.indexOf('买家取走'), bodyText.indexOf('已取回'), bodyText.indexOf('卖家已取回'), 0);
+        const block = bodyText.substring(statusIdx, statusIdx + 350);
+        const m = block.match(/(?:价格|成交价)[：:]\s*[¥]?\s*([\d.]+)/) || block.match(/[¥]\s*(\d+\.?\d*)/);
+        if (m) priceVal = parseFloat(m[1]);
+        if (priceVal == null || isNaN(priceVal)) {
+            const fb = bodyText.match(/价格[：:]\s*[¥]?\s*([\d.]+)/) || bodyHtml.match(/价格[：:][^<]*?([\d.]+)/);
+            if (fb) priceVal = parseFloat(fb[1]);
+        }
 
         const history = getHistory();
         let old = history[eid];
@@ -1017,6 +1042,7 @@
             <button id="btn-reset-filters" class="cbg-btn btn-clear">🧹 重置当前筛选</button>
             <div id="config-list-container" style="max-height: 150px; overflow-y: auto; border: 1px solid #eee; padding: 5px;"></div>
 
+            <button id="btn-keepalive" class="cbg-btn btn-clear" style="margin-bottom:5px">🔄 立即保活</button>
             <div id="cbg-status">准备就绪...</div>
         `;
         document.body.appendChild(div);
@@ -1024,6 +1050,7 @@
         document.getElementById('btn-scan').addEventListener('click', runScan);
         document.getElementById('btn-history-mgr').addEventListener('click', showHistoryManagerModal);
         document.getElementById('btn-clear').addEventListener('click', clearHistory);
+        document.getElementById('btn-keepalive').addEventListener('click', () => { doKeepAlivePing(); });
         document.getElementById('btn-save-config').addEventListener('click', saveCurrentConfig);
         document.getElementById('btn-reset-filters').addEventListener('click', resetCurrentFilters);
 
