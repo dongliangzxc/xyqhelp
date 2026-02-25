@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CBG 捡漏助手 v3.8 (导入导出)
 // @namespace    http://tampermonkey.net/
-// @version      3.9.3
+// @version      3.9.4
 // @description  召唤兽历史记录对比 + 一键保存/读取搜索筛选条件（修复服务器、宝宝、等级按钮不生效问题）。
 // @author       YourName
 // @match        *://*.cbg.163.com/*
@@ -26,6 +26,7 @@
     const OFFLINE_THRESHOLD_MS = OFFLINE_THRESHOLD_HOURS * 60 * 60 * 1000;
     const SCAN_BATCH_KEY = 'cbg_scan_batch_v1';
     const CO_BATCH_THRESHOLD = 3; // 同批至少 N 个仍刷到，则未刷到的标记为「同批未刷到」
+    const AUTO_SCAN_ENABLED_KEY = 'cbg_auto_scan_enabled';
 
     // --- 样式注入 ---
     const style = document.createElement('style');
@@ -588,7 +589,18 @@
     let lastAutoScanTime = 0;
     const AUTO_SCAN_THROTTLE_MS = 2000;
 
+    function isAutoScanEnabled() {
+        try {
+            const v = localStorage.getItem(AUTO_SCAN_ENABLED_KEY);
+            return v === null || v === 'true';
+        } catch (e) { return true; }
+    }
+    function setAutoScanEnabled(enabled) {
+        try { localStorage.setItem(AUTO_SCAN_ENABLED_KEY, String(enabled)); } catch (e) {}
+    }
+
     function tryAutoScan() {
+        if (!isAutoScanEnabled()) return;
         if (!document.getElementById('cbg-helper-panel')) return;
         const rows = document.querySelectorAll('tr[log-exposure], .equip-list-item, .list-item');
         if (rows.length === 0) return;
@@ -605,7 +617,7 @@
         const now = Date.now();
         if (now - lastAutoScanTime < AUTO_SCAN_THROTTLE_MS) return;
         lastAutoScanTime = now;
-        runScan();
+        runScan(true);
     }
 
     function startAutoScanObserver() {
@@ -617,7 +629,7 @@
         obs.observe(document.body, { childList: true, subtree: true });
     }
 
-    function runScan() {
+    function runScan(isAutoScan = false) {
         const statusDiv = document.getElementById('cbg-status');
         statusDiv.innerHTML = "正在提取数据...";
         let history = getHistory();
@@ -769,6 +781,10 @@
         let statusMsg = `本次扫描: 新增 <b style="color:red">${newCount}</b> | 价格变动 <b style="color:#d9534f">${priceChangeCount}</b>`;
         if (inferredCount) statusMsg += ` | 同批未刷到 <b style="color:#dc3545">${inferredCount}</b>`;
         statusMsg += ` | 已记录 ${total}`;
+        if (isAutoScan) {
+            statusMsg += ` | <span style="color:#17a2b8">✓ 已自动扫描</span>`;
+            showToast('已自动扫描');
+        }
         if (sortOrder !== 'price_asc') statusMsg += `<br><span style="color:#d9534f">${sortOrder === 'price_desc' ? '当前为价格从高到低' : '当前可能非价格从低到高'}，建议手动切换</span>`;
         statusDiv.innerHTML = statusMsg;
         refreshDailyStats();
@@ -1242,8 +1258,12 @@
         const div = document.createElement('div');
         div.id = 'cbg-helper-panel';
         div.innerHTML = `
-            <h3>🐶 召唤兽助手 v3.9.3</h3>
+            <h3>🐶 召唤兽助手 v3.9.4</h3>
             <div id="cbg-daily-stats" style="font-size:11px;color:#666;padding:4px 0;border-bottom:1px dashed #eee">今日: 加载中...</div>
+            <label style="display:flex;align-items:center;gap:6px;margin:8px 0;cursor:pointer">
+                <input type="checkbox" id="cbg-auto-scan-toggle" checked>
+                <span>自动扫描（进入/翻页时）</span>
+            </label>
             <button id="btn-scan" class="cbg-btn btn-scan">🔍 扫描当前页</button>
             <button id="btn-history-mgr" class="cbg-btn btn-view">📑 历史管理</button>
             <button id="btn-clear" class="cbg-btn btn-clear">🗑️ 清空历史</button>
@@ -1258,7 +1278,13 @@
         `;
         document.body.appendChild(div);
 
-        document.getElementById('btn-scan').addEventListener('click', runScan);
+        const autoScanToggle = document.getElementById('cbg-auto-scan-toggle');
+        autoScanToggle.checked = isAutoScanEnabled();
+        autoScanToggle.addEventListener('change', () => {
+            setAutoScanEnabled(autoScanToggle.checked);
+        });
+
+        document.getElementById('btn-scan').addEventListener('click', () => runScan(false));
         document.getElementById('btn-history-mgr').addEventListener('click', showHistoryManagerModal);
         document.getElementById('btn-clear').addEventListener('click', clearHistory);
         document.getElementById('btn-keepalive').addEventListener('click', () => { doKeepAlivePing(); });
