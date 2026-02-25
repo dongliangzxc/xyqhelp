@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CBG 捡漏助手 v3.8 (导入导出)
 // @namespace    http://tampermonkey.net/
-// @version      3.9.2
+// @version      3.9.3
 // @description  召唤兽历史记录对比 + 一键保存/读取搜索筛选条件（修复服务器、宝宝、等级按钮不生效问题）。
 // @author       YourName
 // @match        *://*.cbg.163.com/*
@@ -582,6 +582,39 @@
             if (desc && !asc) return 'price_desc';
         }
         return 'unknown';
+    }
+
+    /** 自动扫描：仅当「价格从低到高」时才执行，进入结果页、翻页后自动触发 */
+    let lastAutoScanTime = 0;
+    const AUTO_SCAN_THROTTLE_MS = 2000;
+
+    function tryAutoScan() {
+        if (!document.getElementById('cbg-helper-panel')) return;
+        const rows = document.querySelectorAll('tr[log-exposure], .equip-list-item, .list-item');
+        if (rows.length === 0) return;
+
+        // 先检测排序：只有「价格从低到高」才自动扫描
+        const pricesOnPage = [];
+        rows.forEach(row => {
+            const d = parsePetRow(row);
+            if (d && typeof d.price === 'number') pricesOnPage.push(d.price);
+        });
+        const sortOrder = detectSortOrder(pricesOnPage);
+        if (sortOrder !== 'price_asc') return;
+
+        const now = Date.now();
+        if (now - lastAutoScanTime < AUTO_SCAN_THROTTLE_MS) return;
+        lastAutoScanTime = now;
+        runScan();
+    }
+
+    function startAutoScanObserver() {
+        let debounceTimer;
+        const obs = new MutationObserver(() => {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(tryAutoScan, 600);
+        });
+        obs.observe(document.body, { childList: true, subtree: true });
     }
 
     function runScan() {
@@ -1209,7 +1242,7 @@
         const div = document.createElement('div');
         div.id = 'cbg-helper-panel';
         div.innerHTML = `
-            <h3>🐶 召唤兽助手 v3.9</h3>
+            <h3>🐶 召唤兽助手 v3.9.3</h3>
             <div id="cbg-daily-stats" style="font-size:11px;color:#666;padding:4px 0;border-bottom:1px dashed #eee">今日: 加载中...</div>
             <button id="btn-scan" class="cbg-btn btn-scan">🔍 扫描当前页</button>
             <button id="btn-history-mgr" class="cbg-btn btn-view">📑 历史管理</button>
@@ -1246,6 +1279,12 @@
 
         // 页面加载完成后启动会话保活
         startKeepAlive();
+
+        // 自动扫描：进入结果页、翻页后自动执行
+        setTimeout(tryAutoScan, 500);
+        setTimeout(tryAutoScan, 2500);
+        if (document.body) startAutoScanObserver();
+        else document.addEventListener('DOMContentLoaded', startAutoScanObserver);
     }
 
     // 详情页：自动解析状态与成交价并更新历史
