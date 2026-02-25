@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CBG 捡漏助手 v3.8 (导入导出)
 // @namespace    http://tampermonkey.net/
-// @version      3.9.4
+// @version      3.9.5
 // @description  召唤兽历史记录对比 + 一键保存/读取搜索筛选条件（修复服务器、宝宝、等级按钮不生效问题）。
 // @author       YourName
 // @match        *://*.cbg.163.com/*
@@ -585,9 +585,8 @@
         return 'unknown';
     }
 
-    /** 自动扫描：仅当「价格从低到高」时才执行，进入结果页、翻页后自动触发 */
-    let lastAutoScanTime = 0;
-    const AUTO_SCAN_THROTTLE_MS = 2000;
+    /** 自动扫描：仅当「价格从低到高」时才执行，当前页扫过一次即停，翻页/新页再扫 */
+    let lastAutoScanPageId = null;
 
     function isAutoScanEnabled() {
         try {
@@ -599,11 +598,24 @@
         try { localStorage.setItem(AUTO_SCAN_ENABLED_KEY, String(enabled)); } catch (e) {}
     }
 
+    function getCurrentPageId(rows) {
+        const ids = [];
+        rows.forEach(row => {
+            const d = parsePetRow(row);
+            if (d && d.id) ids.push(d.id);
+        });
+        return location.href + '|' + ids.join(',');
+    }
+
     function tryAutoScan() {
         if (!isAutoScanEnabled()) return;
         if (!document.getElementById('cbg-helper-panel')) return;
         const rows = document.querySelectorAll('tr[log-exposure], .equip-list-item, .list-item');
         if (rows.length === 0) return;
+
+        // 当前页已扫过则不再扫（避免 MutationObserver 因广告等 DOM 变化反复触发）
+        const pageId = getCurrentPageId(rows);
+        if (pageId === lastAutoScanPageId) return;
 
         // 先检测排序：只有「价格从低到高」才自动扫描
         const pricesOnPage = [];
@@ -614,9 +626,7 @@
         const sortOrder = detectSortOrder(pricesOnPage);
         if (sortOrder !== 'price_asc') return;
 
-        const now = Date.now();
-        if (now - lastAutoScanTime < AUTO_SCAN_THROTTLE_MS) return;
-        lastAutoScanTime = now;
+        lastAutoScanPageId = pageId;
         runScan(true);
     }
 
@@ -1258,7 +1268,7 @@
         const div = document.createElement('div');
         div.id = 'cbg-helper-panel';
         div.innerHTML = `
-            <h3>🐶 召唤兽助手 v3.9.4</h3>
+            <h3>🐶 召唤兽助手 v3.9.5</h3>
             <div id="cbg-daily-stats" style="font-size:11px;color:#666;padding:4px 0;border-bottom:1px dashed #eee">今日: 加载中...</div>
             <label style="display:flex;align-items:center;gap:6px;margin:8px 0;cursor:pointer">
                 <input type="checkbox" id="cbg-auto-scan-toggle" checked>
