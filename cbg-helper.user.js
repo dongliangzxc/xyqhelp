@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CBG 捡漏助手 v3.8 (导入导出)
 // @namespace    http://tampermonkey.net/
-// @version      3.11.0
+// @version      3.11.1
 // @description  宠物/玉魄等历史记录 + 自动扫描 + 筛选方案管理。
 // @author       YourName
 // @match        *://*.cbg.163.com/*
@@ -81,7 +81,6 @@
         .hm-btn-alive { color: #28a745; border-color: #28a745; }
         .hm-btn-link { text-decoration: none; color: #007bff; }
         .hm-btn-del { color: #dc3545; border-color: #dc3545; }
-        .hm-btn-cbg { color: #17a2b8; border-color: #17a2b8; font-size: 11px; padding: 2px 6px; }
         .hm-preset { padding:2px 8px;font-size:11px;border:1px solid #ddd;border-radius:4px;cursor:pointer;background:#fff;color:#666; }
         .hm-preset:hover { background:#f0f0f0; }
         .hm-table .col-price { color: #d9534f; font-weight: bold; }
@@ -171,7 +170,7 @@
             });
             config.buttonLists[panelId] = selectedIndices;
         });
-
+git
         const allConfigs = getConfigs();
         allConfigs[configName] = config;
         saveConfigs(allConfigs);
@@ -1378,6 +1377,30 @@
             const nowTs = Date.now();
 
             const filterType = document.getElementById('hm-filter-type')?.value || 'all';
+            const isPetView = filterType === 'pet' || filterType === 'all';
+            const skillWrap = document.getElementById('hm-skill-wrap');
+            if (skillWrap) skillWrap.style.display = isPetView ? 'flex' : 'none';
+            const presetWrap = document.getElementById('hm-preset-wrap');
+            if (presetWrap) {
+                if (isPetView) {
+                    presetWrap.style.display = 'flex';
+                    presetWrap.innerHTML = '<span style="font-size:11px;color:#999">快捷:</span><button type="button" class="hm-preset" data-kw="高连+必杀">高连必杀</button><button type="button" class="hm-preset" data-kw="高连+隐身">高连隐攻</button><button type="button" class="hm-preset" data-kw="高连+偷袭">高连偷袭</button><button type="button" class="hm-preset" data-kw="-神佑">排除神佑</button>';
+                } else presetWrap.style.display = 'none';
+            }
+            const th1 = document.getElementById('hm-th-col1');
+            const th2 = document.getElementById('hm-th-col2');
+            if (th1 && th2) {
+                if (filterType === 'pet') { th1.textContent = '资质/成长'; th2.textContent = '技能数'; }
+                else if (filterType === 'equip') { th1.textContent = '等级/主属性'; th2.textContent = '锻造/特技/套装'; }
+                else if (filterType === 'lingshi') { th1.textContent = '等级/主属性'; th2.textContent = '精炼/附加'; }
+                else if (filterType === 'yupo') { th1.textContent = '摘要'; th2.textContent = '附加属性'; }
+                else { th1.textContent = '属性'; th2.textContent = '详情'; }
+            }
+            const sortEl = document.getElementById('hm-sort');
+            if (sortEl) {
+                const opt = sortEl.querySelector('option[value="skillNum"]');
+                if (opt) opt.style.display = isPetView ? '' : 'none';
+            }
             const filterAuto = document.getElementById('hm-filter-auto').value;
             const filterManual = document.getElementById('hm-filter-manual').value;
             const keyword = (document.getElementById('hm-search').value || '').trim();
@@ -1404,8 +1427,10 @@
                 const p = typeof item.price === 'number' ? item.price : 0;
                 if (priceMin > 0 && p < priceMin) return false;
                 if (priceMax > 0 && p > priceMax) return false;
-                const sk = item.skillNum || (item.skills && item.skills.length) || 0;
-                if (skillMin > 0 && sk < skillMin) return false;
+                if (skillMin > 0 && (item.itemType || 'pet') === 'pet') {
+                    const sk = item.skillNum || (item.skills && item.skills.length) || 0;
+                    if (sk < skillMin) return false;
+                }
                 if (keyword && !matchKeyword(item, keyword)) return false;
                 return true;
             });
@@ -1455,7 +1480,6 @@
                         <button class="hm-btn hm-btn-alive" data-id="${item.id}">还在</button>
                         <button class="hm-btn hm-btn-clear" data-id="${item.id}">清除</button>
                         <a href="${item.link}" target="_blank" class="hm-btn hm-btn-link">查看</a>
-                        <button class="hm-btn hm-btn-cbg" data-id="${item.id}" title="在CBG搜索类似">搜</button>
                         <button class="hm-btn hm-btn-del" data-id="${item.id}">删除</button>
                     </td>
                 </tr>`;
@@ -1511,16 +1535,12 @@
                     <option value="offline">已下架</option>
                 </select></label>
                 <label style="display:flex;align-items:center;gap:6px">价格: <input type="number" id="hm-price-min" placeholder="最低" style="width:70px;padding:6px;border:1px solid #ccc;border-radius:4px"> ~ <input type="number" id="hm-price-max" placeholder="最高" style="width:70px;padding:6px;border:1px solid #ccc;border-radius:4px"></label>
-                <label style="display:flex;align-items:center;gap:6px">技能数: <input type="number" id="hm-skill-min" placeholder="≥" style="width:50px;padding:6px;border:1px solid #ccc;border-radius:4px"></label>
+                <label id="hm-skill-wrap" style="display:flex;align-items:center;gap:6px">技能数: <input type="number" id="hm-skill-min" placeholder="≥" style="width:50px;padding:6px;border:1px solid #ccc;border-radius:4px"></label>
                 <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="hm-filter-server" title="仅显示当前页面服务器"> 本服</label>
             </div>
             <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-                <label style="display:flex;align-items:center;gap:6px">搜索: <input type="text" id="hm-search" placeholder="名称/技能/特技，高连+必杀 组合，-神佑 排除" style="padding:6px 12px;width:260px;border:1px solid #ccc;border-radius:4px"></label>
-                <span style="font-size:11px;color:#999">快捷: </span>
-                <button type="button" class="hm-preset" data-kw="高连+必杀">高连必杀</button>
-                <button type="button" class="hm-preset" data-kw="高连+隐身">高连隐攻</button>
-                <button type="button" class="hm-preset" data-kw="高连+偷袭">高连偷袭</button>
-                <button type="button" class="hm-preset" data-kw="-神佑">排除神佑</button>
+                <label style="display:flex;align-items:center;gap:6px">搜索: <input type="text" id="hm-search" placeholder="名称/技能/特技/属性" style="padding:6px 12px;width:220px;border:1px solid #ccc;border-radius:4px"></label>
+                <span id="hm-preset-wrap" style="display:flex;align-items:center;gap:6px"></span>
                 <label style="display:flex;align-items:center;gap:6px">排序: <select id="hm-sort" style="padding:6px 10px;border:1px solid #ccc;border-radius:4px">
                     <option value="lastSeen">最近刷到</option>
                     <option value="priceAsc">价格升序</option>
@@ -1529,15 +1549,13 @@
                     <option value="skillNum">技能数</option>
                 </select></label>
                 <button class="hm-btn" id="hm-apply" style="padding:4px 12px;border:1px solid #ddd;border-radius:4px;cursor:pointer;background:#fff">应用</button>
-                <button class="hm-btn" id="hm-search-cbg" style="padding:4px 12px;border:1px solid #17a2b8;border-radius:4px;cursor:pointer;background:#17a2b8;color:#fff" title="用当前筛选在CBG新开页搜索">CBG搜索</button>
-                <button class="hm-btn" id="hm-sync-cbg" style="padding:4px 12px;border:1px solid #6c757d;border-radius:4px;cursor:pointer;background:#fff;color:#6c757d" title="从当前CBG页面读取筛选条件">同步CBG</button>
             </div>
             <div id="hm-stats" style="font-size:11px;color:#666;padding:4px 0"></div>
         </div>
         <div class="hm-content" style="flex:1;overflow:auto;padding:0">
             <table class="hm-table" style="width:100%;border-collapse:collapse;font-size:12px">
                 <thead>
-                    <tr><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">#</th><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">名称</th><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">价格</th><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">资质/成长</th><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">技能数</th><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">自动状态</th><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">手动标记</th><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">操作</th></tr>
+                    <tr><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">#</th><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">名称</th><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">价格</th><th id="hm-th-col1" style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">属性</th><th id="hm-th-col2" style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">详情</th><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">自动状态</th><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">手动标记</th><th style="background:#f2f2f2;padding:10px 8px;text-align:left;position:sticky;top:0">操作</th></tr>
                 </thead>
                 <tbody id="hm-tbody"></tbody>
             </table>
@@ -1569,37 +1587,6 @@
         });
         document.getElementById('hm-search').addEventListener('input', () => { clearTimeout(window._hmT); window._hmT = setTimeout(doRender, 200); });
         document.getElementById('hm-apply').addEventListener('click', doRender);
-        document.getElementById('hm-search-cbg')?.addEventListener('click', () => {
-            const kw = (document.getElementById('hm-search').value || '').trim();
-            const priceMin = document.getElementById('hm-price-min')?.value;
-            const priceMax = document.getElementById('hm-price-max')?.value;
-            const filterType = document.getElementById('hm-filter-type')?.value || 'all';
-            let url = 'https://xyq.cbg.163.com/cbg/';
-            if (filterType === 'equip') url = 'https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=show_overall_search_equip';
-            else if (filterType === 'lingshi') url = 'https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=show_overall_search_lingshi';
-            else if (filterType === 'yupo') url = 'https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=show_overall_search_yupo';
-            const params = [];
-            if (priceMin) params.push('min_price=' + priceMin);
-            if (priceMax) params.push('max_price=' + priceMax);
-            if (kw) params.push('keyword=' + encodeURIComponent(kw));
-            if (params.length) url += (url.includes('?') ? '&' : '?') + params.join('&');
-            window.open(url, '_blank');
-        });
-        document.getElementById('hm-sync-cbg')?.addEventListener('click', () => {
-            let found = 0;
-            const tryInput = (sel, targetId) => {
-                const el = document.querySelector(sel);
-                if (el && el.value && document.getElementById(targetId)) {
-                    document.getElementById(targetId).value = el.value;
-                    found++;
-                }
-            };
-            tryInput('input[name="min_price"], input[id*="min_price"], input[id*="minPrice"]', 'hm-price-min');
-            tryInput('input[name="max_price"], input[id*="max_price"], input[id*="maxPrice"]', 'hm-price-max');
-            tryInput('input[name="keyword"], input[id*="keyword"], input[placeholder*="关键词"]', 'hm-search');
-            doRender();
-            showToast(found ? `已同步 ${found} 项筛选` : '未找到CBG筛选控件，请确保在搜索页');
-        });
         document.getElementById('hm-export').addEventListener('click', exportHistory);
         document.getElementById('hm-import').addEventListener('click', importHistory);
         modal.addEventListener('hm-import-done', () => { doRender(); refreshDailyStats(); });
@@ -1620,19 +1607,6 @@
             }
             else if (t.classList.contains('hm-btn-alive')) { updateItemManualStatus(t.dataset.id, 'alive'); doRender(); refreshDailyStats(); }
             else if (t.classList.contains('hm-btn-clear')) { updateItemManualStatus(t.dataset.id, null); doRender(); refreshDailyStats(); }
-            else if (t.classList.contains('hm-btn-cbg')) {
-                const item = getHistory()[t.dataset.id];
-                if (!item) return;
-                const type = item.itemType || 'pet';
-                let url = 'https://xyq.cbg.163.com/cbg/';
-                if (type === 'equip') url = 'https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=show_overall_search_equip';
-                else if (type === 'lingshi') url = 'https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=show_overall_search_lingshi';
-                else if (type === 'yupo') url = 'https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=show_overall_search_yupo';
-                const kw = (item.skills && item.skills.length) ? item.skills.slice(0, 5).join(' ') : (item.name || item.summary || '');
-                if (kw) url += (url.includes('?') ? '&' : '?') + 'keyword=' + encodeURIComponent(kw);
-                if (item.price) url += (url.includes('?') ? '&' : '?') + 'max_price=' + Math.ceil(item.price * 1.2);
-                window.open(url, '_blank');
-            }
             else if (t.classList.contains('hm-btn-del')) { if (confirm('确定删除该条记录？')) { deleteItem(t.dataset.id); doRender(); refreshDailyStats(); } }
         });
 
@@ -1678,7 +1652,7 @@
         const div = document.createElement('div');
         div.id = 'cbg-helper-panel';
         div.innerHTML = `
-            <h3>🐶 CBG 助手 v3.11</h3>
+            <h3>🐶 CBG 助手 v3.11.1</h3>
             <div id="cbg-daily-stats" style="font-size:11px;color:#666;padding:4px 0;border-bottom:1px dashed #eee">今日: 加载中...</div>
             <label style="display:flex;align-items:center;gap:6px;margin:8px 0;cursor:pointer">
                 <input type="checkbox" id="cbg-auto-scan-toggle" checked>
