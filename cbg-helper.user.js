@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         CBG 捡漏助手 v3.8 (导入导出)
 // @namespace    http://tampermonkey.net/
-// @version      3.9.5
-// @description  召唤兽历史记录对比 + 一键保存/读取搜索筛选条件（修复服务器、宝宝、等级按钮不生效问题）。
+// @version      3.10.2
+// @description  宠物/玉魄等历史记录 + 自动扫描 + 筛选方案管理。
 // @author       YourName
 // @match        *://*.cbg.163.com/*
 // @icon         https://cbg.163.com/favicon.ico
@@ -27,6 +27,8 @@
     const SCAN_BATCH_KEY = 'cbg_scan_batch_v1';
     const CO_BATCH_THRESHOLD = 3; // 同批至少 N 个仍刷到，则未刷到的标记为「同批未刷到」
     const AUTO_SCAN_ENABLED_KEY = 'cbg_auto_scan_enabled';
+
+    // 各类目搜索页 URL 参考：玉魄 show_overall_search_yupo | 灵饰 show_overall_search_lingshi | 装备 show_overall_search_equip | 召唤兽 /cbg/
 
     // --- 样式注入 ---
     const style = document.createElement('style');
@@ -540,8 +542,238 @@
             skills: skills.length ? skills : null,
             link,
             serverid: serverid || null,
+            itemType: 'pet',
             lastSeen: new Date().toLocaleString()
         };
+    }
+
+    /** 解析上古玉魄行（与宠物共用 tr[log-exposure]，通过 data_equip_name 含「玉魄」区分） */
+    function parseYupoRow(row) {
+        const imgTag = row.querySelector('img[data_ordersn]');
+        if (!imgTag) return null;
+
+        const orderSn = imgTag.getAttribute('data_ordersn');
+        const serverid = imgTag.getAttribute('data_serverid');
+        const name = imgTag.getAttribute('data_equip_name');
+        const price = parseFloat(imgTag.getAttribute('data_price'));
+
+        let link = "";
+        const linkTag = row.querySelector('a.soldImg') || row.querySelector('a.equip-list-item-link') || row.querySelector('a[href*="equip"]') || row.querySelector('a');
+        if (linkTag && linkTag.href && linkTag.href.indexOf('javascript') === -1) link = linkTag.href;
+        else link = `https://xyq.cbg.163.com/equip?s=${serverid}&eid=${orderSn}`;
+
+        let summary = "-";
+        let attrs = [];
+        const textAreas = row.querySelectorAll('textarea');
+        for (const ta of textAreas) {
+            try {
+                let str = ta.value || '';
+                const jsonMatch = str.match(/\{[\s\S]*\}/);
+                if (jsonMatch) str = jsonMatch[0];
+                const raw = JSON.parse(str);
+                if (raw.summary) summary = raw.summary;
+                if (Array.isArray(raw.agg_added_attrs)) attrs = raw.agg_added_attrs;
+                else if (raw.minghun && raw.minghun.base) {
+                    attrs = raw.minghun.base.map(b => b.desc).filter(Boolean);
+                }
+                if (attrs.length || summary !== '-') break;
+            } catch (e) {}
+        }
+        if (attrs.length === 0) {
+            const attrCells = row.querySelectorAll('td p');
+            attrCells.forEach(p => { const t = p.textContent?.trim(); if (t && /^[\u4e00-\u9fa5]+\s*[+\-]?\d+/.test(t)) attrs.push(t); });
+        }
+
+        return {
+            id: orderSn,
+            name,
+            price,
+            summary,
+            attrs: attrs.length ? attrs : null,
+            link,
+            serverid: serverid || null,
+            itemType: 'yupo',
+            lastSeen: new Date().toLocaleString()
+        };
+    }
+
+    /** 解析灵饰行（耳饰/戒指/手镯/佩饰，通过 data_equip_type_desc 或 main_attrs 识别） */
+    function parseLingshiRow(row) {
+        const imgTag = row.querySelector('img[data_ordersn]');
+        if (!imgTag) return null;
+
+        const orderSn = imgTag.getAttribute('data_ordersn');
+        const serverid = imgTag.getAttribute('data_serverid');
+        const name = imgTag.getAttribute('data_equip_name');
+        const price = parseFloat(imgTag.getAttribute('data_price'));
+        const level = imgTag.getAttribute('data_equip_level') || null;
+
+        let link = "";
+        const linkTag = row.querySelector('a.soldImg') || row.querySelector('a.equip-list-item-link') || row.querySelector('a[href*="equip"]') || row.querySelector('a');
+        if (linkTag && linkTag.href && linkTag.href.indexOf('javascript') === -1) link = linkTag.href;
+        else link = `https://xyq.cbg.163.com/equip?s=${serverid}&eid=${orderSn}`;
+
+        let summary = "-";
+        let mainAttr = "-";
+        let jinglianLevel = null;
+        let attrs = [];
+        const textAreas = row.querySelectorAll('textarea');
+        for (const ta of textAreas) {
+            try {
+                let str = ta.value || '';
+                const jsonMatch = str.match(/\{[\s\S]*\}/);
+                if (jsonMatch) str = jsonMatch[0];
+                const raw = JSON.parse(str);
+                if (raw.summary) summary = raw.summary;
+                if (raw.jinglian_level != null) jinglianLevel = raw.jinglian_level;
+                if (Array.isArray(raw.main_attrs) && raw.main_attrs.length) {
+                    mainAttr = raw.main_attrs.map(a => Array.isArray(a) ? a.join(' ') : a).join(' ');
+                }
+                if (Array.isArray(raw.agg_added_attrs)) {
+                    attrs = raw.agg_added_attrs.flatMap(s => {
+                        const m = String(s).match(/[\u4e00-\u9fa5]+\s*[+\-]?\d+/g);
+                        return m || (s ? [s] : []);
+                    });
+                }
+                if (summary !== '-' || attrs.length) break;
+            } catch (e) {}
+        }
+        if (attrs.length === 0) {
+            const attrMatch = row.innerHTML.match(/[\u4e00-\u9fa5]+\s*\+\d+(?:\s*\[\+\d+\])?/g);
+            if (attrMatch) attrs = [...new Set(attrMatch)];
+        }
+
+        return {
+            id: orderSn,
+            name,
+            price,
+            level,
+            mainAttr,
+            jinglianLevel,
+            summary,
+            attrs: attrs.length ? attrs : null,
+            link,
+            serverid: serverid || null,
+            itemType: 'lingshi',
+            lastSeen: new Date().toLocaleString()
+        };
+    }
+
+    /** 解析装备行（武器/防具等，有 gem_level/hole_num，与灵饰的 jinglian_level 区分） */
+    function parseEquipRow(row) {
+        const imgTag = row.querySelector('img[data_ordersn]');
+        if (!imgTag) return null;
+
+        const orderSn = imgTag.getAttribute('data_ordersn');
+        const serverid = imgTag.getAttribute('data_serverid');
+        const name = imgTag.getAttribute('data_equip_name');
+        const price = parseFloat(imgTag.getAttribute('data_price'));
+        const level = imgTag.getAttribute('data_equip_level') || null;
+
+        let link = "";
+        const linkTag = row.querySelector('a.soldImg') || row.querySelector('a.equip-list-item-link') || row.querySelector('a[href*="equip"]') || row.querySelector('a');
+        if (linkTag && linkTag.href && linkTag.href.indexOf('javascript') === -1) link = linkTag.href;
+        else link = `https://xyq.cbg.163.com/equip?s=${serverid}&eid=${orderSn}`;
+
+        let summary = "-";
+        let mainAttr = "-";
+        let gemLevel = null;
+        let holeNum = null;
+        let teji = null;
+        let taozhuang = null;
+        let attrs = [];
+
+        const textAreas = row.querySelectorAll('textarea');
+        for (const ta of textAreas) {
+            try {
+                let str = ta.value || '';
+                const jsonMatch = str.match(/\{[\s\S]*\}/);
+                if (jsonMatch) str = jsonMatch[0];
+                const raw = JSON.parse(str);
+                if (raw.summary) summary = raw.summary;
+                if (raw.gem_level != null) gemLevel = raw.gem_level;
+                if (raw.hole_num != null) holeNum = raw.hole_num;
+                if (Array.isArray(raw.main_attrs) && raw.main_attrs.length) {
+                    mainAttr = raw.main_attrs.map(a => Array.isArray(a) ? a.join(' ') : a).join(' ');
+                }
+                if (Array.isArray(raw.melt_attrs) && raw.melt_attrs.length) {
+                    attrs = raw.melt_attrs.map(a => Array.isArray(a) ? a.join(' ') : a);
+                } else if (Array.isArray(raw.agg_added_attrs)) {
+                    attrs = raw.agg_added_attrs.flatMap(s => {
+                        const m = String(s).match(/[\u4e00-\u9fa5]+\s*[+\-]?\d+/g);
+                        return m || (s ? [s] : []);
+                    });
+                }
+                if (summary !== '-' || gemLevel != null) break;
+            } catch (e) {}
+        }
+
+        const highlightsStr = imgTag.getAttribute('data_highlights') || '';
+        try {
+            const decoded = highlightsStr.replace(/&quot;/g, '"');
+            const arr = JSON.parse(decoded);
+            if (Array.isArray(arr)) {
+                arr.forEach(h => {
+                    const txt = Array.isArray(h) ? h[0] : '';
+                    const key = (h && h[2] && h[2].key) || '';
+                    if (/锻|级/.test(txt)) return;
+                    if (/套装$/.test(txt)) taozhuang = txt.replace(/套装$/, '');
+                    else if (key.includes('teji') || (txt && !teji && !taozhuang && /^[\u4e00-\u9fa5]{2,8}$/.test(txt))) teji = txt;
+                });
+            }
+        } catch (e) {}
+        if (!teji && !taozhuang) {
+            const tds = row.querySelectorAll('td');
+            const seen = new Set();
+            tds.forEach(td => {
+                const t = td.textContent?.trim();
+                if (t && /^[\u4e00-\u9fa5]{2,8}$/.test(t) && !seen.has(t) && !/玛瑙|翡翠|太阳|月亮|黑宝|红纹|黄晶|绿宝|蓝宝|紫晶|锻炼/.test(t)) {
+                    seen.add(t);
+                    if (t.endsWith('套装')) taozhuang = t.replace(/套装$/, '');
+                    else if (!teji) teji = t;
+                }
+            });
+        }
+
+        return {
+            id: orderSn,
+            name,
+            price,
+            level,
+            mainAttr,
+            gemLevel,
+            holeNum,
+            summary,
+            teji: teji || null,
+            taozhuang: taozhuang || null,
+            attrs: attrs.length ? attrs : null,
+            link,
+            serverid: serverid || null,
+            itemType: 'equip',
+            lastSeen: new Date().toLocaleString()
+        };
+    }
+
+    /** 统一解析：根据名称/结构自动识别宠物、玉魄、灵饰或装备 */
+    function parseItemRow(row) {
+        const imgTag = row.querySelector('img[data_ordersn]');
+        if (!imgTag) return null;
+        const name = imgTag.getAttribute('data_equip_name') || '';
+        const typeDesc = imgTag.getAttribute('data_equip_type_desc') || '';
+        if (/上古玉魄|玉魄/.test(name)) return parseYupoRow(row);
+        if (/耳饰|戒指|手镯|佩饰/.test(typeDesc)) return parseLingshiRow(row);
+        const ta = row.querySelector('textarea');
+        if (ta) {
+            try {
+                const jsonMatch = (ta.value || '').match(/\{[\s\S]*\}/);
+                if (jsonMatch) {
+                    const raw = JSON.parse(jsonMatch[0]);
+                    if (raw.gem_level != null || raw.hole_num != null) return parseEquipRow(row);
+                    if (raw.jinglian_level != null) return parseLingshiRow(row);
+                }
+            } catch (e) {}
+        }
+        return parsePetRow(row);
     }
 
     /** 检测当前列表是否按「价格从低到高」排序。返回 'price_asc' | 'price_desc' | 'unknown' */
@@ -601,7 +833,7 @@
     function getCurrentPageId(rows) {
         const ids = [];
         rows.forEach(row => {
-            const d = parsePetRow(row);
+            const d = parseItemRow(row);
             if (d && d.id) ids.push(d.id);
         });
         return location.href + '|' + ids.join(',');
@@ -620,7 +852,7 @@
         // 先检测排序：只有「价格从低到高」才自动扫描
         const pricesOnPage = [];
         rows.forEach(row => {
-            const d = parsePetRow(row);
+            const d = parseItemRow(row);
             if (d && typeof d.price === 'number') pricesOnPage.push(d.price);
         });
         const sortOrder = detectSortOrder(pricesOnPage);
@@ -670,7 +902,7 @@
         let maxPriceOnPage = 0;
         const pricesOnPage = [];
         rows.forEach(row => {
-            const d = parsePetRow(row);
+            const d = parseItemRow(row);
             if (d) {
                 currentScanIds.add(d.id);
                 if (typeof d.price === 'number') {
@@ -712,7 +944,7 @@
         let priceChangeCount = 0;
 
         rows.forEach(row => {
-            const data = parsePetRow(row);
+            const data = parseItemRow(row);
             if(!data) return;
 
             const old = history[data.id];
@@ -726,7 +958,7 @@
             if(isNew) {
                 newCount++;
                 row.style.backgroundColor = HIGHLIGHT_COLOR;
-                const priceArea = row.querySelector('.price') || row.querySelector('.equip-price') || row.querySelector('td:nth-child(3)');
+                const priceArea = row.querySelector('.price') || row.querySelector('.equip-price') || row.querySelector('td:nth-child(3)') || row.querySelector('td:nth-child(6)') || [...row.querySelectorAll('td')].find(td => td.textContent && /￥|¥/.test(td.textContent));
                 if(priceArea) {
                     const badge = document.createElement('span');
                     badge.className = 'new-tag-badge';
@@ -749,7 +981,7 @@
                 if (priceChanged) {
                     priceChangeCount++;
                     row.style.backgroundColor = HIGHLIGHT_COLOR;
-                    const priceArea = row.querySelector('.price') || row.querySelector('.equip-price') || row.querySelector('td:nth-child(3)');
+                    const priceArea = row.querySelector('.price') || row.querySelector('.equip-price') || row.querySelector('td:nth-child(3)') || row.querySelector('td:nth-child(6)') || [...row.querySelectorAll('td')].find(td => td.textContent && /￥|¥/.test(td.textContent));
                     if(priceArea) {
                         const badge = document.createElement('span');
                         badge.className = 'new-tag-badge';
@@ -927,6 +1159,11 @@
             delete history[id].soldPrice;
             delete history[id].soldAt;
         }
+        // 已手动标记则清除「同批未刷到」，不再显示推断状态
+        if (status === 'sold' || status === 'alive' || status === 'offline') {
+            delete history[id].inferredOffline;
+            delete history[id].inferredOfflineAt;
+        }
         saveHistory(history);
     }
 
@@ -973,18 +1210,24 @@
 
         if (newStatus === 'sold') {
             history[updateKey] = { ...old, manualStatus: 'sold', soldPrice: priceVal != null ? priceVal : old.soldPrice, soldAt: new Date().toLocaleDateString() };
+            delete history[updateKey].inferredOffline;
+            delete history[updateKey].inferredOfflineAt;
             saveHistory(history);
             return { eid, status: 'sold', price: priceVal };
         }
         if (newStatus === 'offline') {
             history[updateKey] = { ...old, manualStatus: 'offline' };
             delete history[updateKey].soldPrice;
+            delete history[updateKey].inferredOffline;
+            delete history[updateKey].inferredOfflineAt;
             saveHistory(history);
             return { eid, status: 'offline' };
         }
         if (newStatus === 'alive') {
             history[updateKey] = { ...old, manualStatus: 'alive' };
             delete history[updateKey].soldPrice;
+            delete history[updateKey].inferredOffline;
+            delete history[updateKey].inferredOfflineAt;
             saveHistory(history);
             return { eid, status: 'alive' };
         }
@@ -1066,6 +1309,10 @@
             const raw = item.lastScannedAt || item.lastSeen;
             let lastScanTs = 0;
             if (raw) { const t = Date.parse(raw); if (!isNaN(t)) lastScanTs = t; }
+            // 已手动标记则不再显示「同批未刷到」「近期未刷到」等推断状态
+            if (item.manualStatus === 'sold' || item.manualStatus === 'alive' || item.manualStatus === 'offline') {
+                return { text: '已确认', color: '#999', key: 'confirmed' };
+            }
             // 同批未刷到：同页其他都刷到了就它没刷到 → 大概率已售/下架（高置信）
             if (item.inferredOffline) {
                 return { text: '同批未刷到', color: '#dc3545', key: 'likely_offline' };
@@ -1108,7 +1355,12 @@
                     const nameMatch = (item.name || '').toLowerCase().includes(kw);
                     const linkMatch = (item.link || '').toLowerCase().includes(kw);
                     const skillMatch = Array.isArray(item.skills) && item.skills.some(s => (s || '').toLowerCase().includes(kw));
-                    if (!nameMatch && !linkMatch && !skillMatch) return false;
+                    const attrMatch = Array.isArray(item.attrs) && item.attrs.some(a => (a || '').toLowerCase().includes(kw));
+                    const summaryMatch = (item.summary || '').toLowerCase().includes(kw);
+                    const mainAttrMatch = (item.mainAttr || '').toLowerCase().includes(kw);
+                    const tejiMatch = (item.teji || '').toLowerCase().includes(kw);
+                    const taozhuangMatch = (item.taozhuang || '').toLowerCase().includes(kw);
+                    if (!nameMatch && !linkMatch && !skillMatch && !attrMatch && !summaryMatch && !mainAttrMatch && !tejiMatch && !taozhuangMatch) return false;
                 }
                 return true;
             });
@@ -1124,13 +1376,29 @@
                 const manualText = m === 'sold' ? (item.soldPrice != null ? `已卖掉 ¥${item.soldPrice}` : '已确认卖掉') : m === 'alive' ? '已确认还在' : m === 'offline' ? '已下架' : '未处理';
                 const manualColor = m === 'sold' ? '#d9534f' : m === 'alive' ? '#28a745' : m === 'offline' ? '#6c757d' : '#999';
                 const esc = s => String(s || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                const type = item.itemType || 'pet';
+                const typeLabel = type === 'yupo' ? '玉魄' : type === 'lingshi' ? '灵饰' : type === 'equip' ? '装备' : '宠物';
+                let col1, col2;
+                if (type === 'yupo') {
+                    col1 = esc(item.summary || '-');
+                    col2 = item.attrs && item.attrs.length ? '<br><span style="font-size:10px;color:#666">' + esc(item.attrs.slice(0,5).join(' ')) + (item.attrs.length > 5 ? '…' : '') + '</span>' : '-';
+                } else if (type === 'lingshi') {
+                    col1 = `${item.level || '-'}级 ${esc(item.mainAttr || '-')}`;
+                    col2 = (item.jinglianLevel != null ? '精炼' + item.jinglianLevel + ' ' : '') + (item.attrs && item.attrs.length ? '<br><span style="font-size:10px;color:#666">' + esc(item.attrs.slice(0,4).join(' ')) + (item.attrs.length > 4 ? '…' : '') + '</span>' : '-');
+                } else if (type === 'equip') {
+                    col1 = `${item.level || '-'}级 ${esc(item.mainAttr || '-')}`;
+                    col2 = (item.gemLevel != null ? item.gemLevel + '锻 ' : '') + (item.holeNum != null ? item.holeNum + '孔 ' : '') + (item.teji ? esc(item.teji) + ' ' : '') + (item.taozhuang ? esc(item.taozhuang) : '') + (item.attrs && item.attrs.length ? '<br><span style="font-size:10px;color:#666">' + esc(item.attrs.slice(0,3).join(' ')) + '</span>' : '');
+                } else {
+                    col1 = `攻: ${esc(item.gongzi)} / 成: ${esc(item.chengzhang)}`;
+                    col2 = `${esc(item.skillNum)} 技能${item.skills && item.skills.length ? '<br><span style="font-size:10px;color:#666">' + esc(item.skills.slice(0,5).join(' ')) + (item.skills.length > 5 ? '…' : '') + '</span>' : ''}`;
+                }
                 return `
                 <tr data-id="${item.id}" style="background:${auto.key === 'likely_offline' ? '#ffe6e6' : auto.key === 'offline' ? '#fff5f5' : ''}">
                     <td>${i + 1}</td>
-                    <td><a href="${item.link}" target="_blank" style="font-weight:bold;color:#007bff">${esc(item.name)}</a></td>
+                    <td><a href="${item.link}" target="_blank" style="font-weight:bold;color:#007bff">${esc(item.name)}</a><span style="font-size:10px;color:#999;margin-left:4px">${typeLabel}</span></td>
                     <td class="col-price">${priceStr}</td>
-                    <td>攻: ${esc(item.gongzi)} / 成: ${esc(item.chengzhang)}</td>
-                    <td>${esc(item.skillNum)} 技能${item.skills && item.skills.length ? '<br><span style="font-size:10px;color:#666">' + esc(item.skills.slice(0,5).join(' ')) + (item.skills.length > 5 ? '…' : '') + '</span>' : ''}</td>
+                    <td>${col1}</td>
+                    <td>${col2}</td>
                     <td><span style="color:${auto.color}">${auto.text}</span></td>
                     <td><span style="color:${manualColor}">${manualText}</span></td>
                     <td>
@@ -1150,7 +1418,7 @@
 <div id="cbg-history-manager-modal" style="position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:100001;display:flex;justify-content:center;align-items:center;">
     <div style="background:#fff;width:95%;max-width:1100px;height:90%;border-radius:8px;display:flex;flex-direction:column;box-shadow:0 5px 15px rgba(0,0,0,0.3);overflow:hidden;">
         <div class="hm-header" style="background:#333;color:#fff;padding:12px 20px;display:flex;justify-content:space-between;align-items:center;flex-shrink:0">
-            <h1 style="margin:0;font-size:18px">📦 CBG 召唤兽历史管理</h1>
+            <h1 style="margin:0;font-size:18px">📦 CBG 历史管理（宠物/玉魄/灵饰/装备）</h1>
             <div style="display:flex;align-items:center;gap:10px">
                 <button class="hm-btn" id="hm-export" style="padding:4px 10px;color:#fff;border-color:#fff;background:transparent">导出</button>
                 <button class="hm-btn" id="hm-import" style="padding:4px 10px;color:#fff;border-color:#fff;background:transparent">导入</button>
@@ -1268,7 +1536,7 @@
         const div = document.createElement('div');
         div.id = 'cbg-helper-panel';
         div.innerHTML = `
-            <h3>🐶 召唤兽助手 v3.9.5</h3>
+            <h3>🐶 CBG 助手 v3.10.2</h3>
             <div id="cbg-daily-stats" style="font-size:11px;color:#666;padding:4px 0;border-bottom:1px dashed #eee">今日: 加载中...</div>
             <label style="display:flex;align-items:center;gap:6px;margin:8px 0;cursor:pointer">
                 <input type="checkbox" id="cbg-auto-scan-toggle" checked>
