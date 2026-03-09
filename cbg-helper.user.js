@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CBG 捡漏助手 v3.8 (导入导出)
 // @namespace    http://tampermonkey.net/
-// @version      3.11.2
+// @version      3.11.3
 // @description  宠物/玉魄等历史记录 + 自动扫描 + 筛选方案管理。
 // @author       YourName
 // @match        *://*.cbg.163.com/*
@@ -27,6 +27,12 @@
     const SCAN_BATCH_KEY = 'cbg_scan_batch_v1';
     const CO_BATCH_THRESHOLD = 3; // 同批至少 N 个仍刷到，则未刷到的标记为「同批未刷到」
     const AUTO_SCAN_ENABLED_KEY = 'cbg_auto_scan_enabled';
+    const AUTO_CHECK_INTERVAL_MIN = 90;   // 一键请求：间隔 90-180 秒
+    const AUTO_CHECK_INTERVAL_MAX = 180;
+    const AUTO_CHECK_PAUSE_EVERY = 5;     // 每 N 个后休息
+    const AUTO_CHECK_PAUSE_MIN = 120;     // 休息 2-4 分钟
+    const AUTO_CHECK_PAUSE_MAX = 240;
+    const AUTO_CHECK_MAX_PER_RUN = 15;    // 单次最多打开数量
 
     // 技能缩写映射（宠物胚子常用）
     const SKILL_ABBREV = {
@@ -1516,7 +1522,7 @@ git
             <div style="display:flex;align-items:center;gap:10px">
                 <button class="hm-btn" id="hm-export" style="padding:4px 10px;color:#fff;border-color:#fff;background:transparent">导出</button>
                 <button class="hm-btn" id="hm-import" style="padding:4px 10px;color:#fff;border-color:#fff;background:transparent">导入</button>
-                <button class="hm-btn" id="hm-auto-check" style="padding:4px 10px;background:#f0ad4e;color:#fff;border:none;border-radius:4px;cursor:pointer" title="当前筛选下未确认的项，每30-60秒自动打开详情页">一键请求</button>
+                <button class="hm-btn" id="hm-auto-check" style="padding:4px 10px;background:#f0ad4e;color:#fff;border:none;border-radius:4px;cursor:pointer" title="当前筛选下未确认的项，90-180秒间隔，每5个休息2-4分钟，单次最多15个">一键请求</button>
                 <span id="hm-auto-check-status" style="font-size:11px;color:#ffc107"></span>
                 <span id="hm-count">加载中...</span>
                 <span id="hm-close" style="margin-left:5px;cursor:pointer;font-size:24px;color:#fff">&times;</span>
@@ -1617,7 +1623,12 @@ git
                 showToast('当前筛选下没有未确认的项');
                 return;
             }
-            autoCheckQueue = unconfirmed.map(i => i.link).filter(Boolean);
+            const links = unconfirmed.map(i => i.link).filter(Boolean).slice(0, AUTO_CHECK_MAX_PER_RUN);
+            if (links.length < unconfirmed.length) {
+                showToast(`单次最多 ${AUTO_CHECK_MAX_PER_RUN} 个，已取前 ${links.length} 个`);
+            }
+            autoCheckQueue = links;
+            let openedCount = 0;
             btn.textContent = '停止';
             btn.style.background = '#dc3545';
             const openNext = () => {
@@ -1626,13 +1637,21 @@ git
                     btn.textContent = '一键请求';
                     btn.style.background = '#f0ad4e';
                     if (statusEl) statusEl.textContent = '已完成';
-                    showToast('已全部打开');
+                    showToast(`已打开 ${openedCount} 个，建议稍后再用`);
                     return;
                 }
                 const link = autoCheckQueue.shift();
                 window.open(link, 'cbg_auto_check');
-                if (statusEl) statusEl.textContent = `剩余 ${autoCheckQueue.length} 个，约30-60秒后下一个`;
-                const delay = 30000 + Math.random() * 30000;
+                openedCount++;
+                const isPause = openedCount > 0 && openedCount % AUTO_CHECK_PAUSE_EVERY === 0;
+                const delay = isPause
+                    ? (AUTO_CHECK_PAUSE_MIN + Math.random() * (AUTO_CHECK_PAUSE_MAX - AUTO_CHECK_PAUSE_MIN)) * 1000
+                    : (AUTO_CHECK_INTERVAL_MIN + Math.random() * (AUTO_CHECK_INTERVAL_MAX - AUTO_CHECK_INTERVAL_MIN)) * 1000;
+                if (statusEl) {
+                    statusEl.textContent = isPause
+                        ? `剩余 ${autoCheckQueue.length} 个，休息 ${Math.round(delay/60000)} 分钟后下一个`
+                        : `剩余 ${autoCheckQueue.length} 个，约 ${Math.round(delay/1000)} 秒后下一个`;
+                }
                 autoCheckTimer = setTimeout(openNext, delay);
             };
             openNext();
@@ -1702,7 +1721,7 @@ git
         const div = document.createElement('div');
         div.id = 'cbg-helper-panel';
         div.innerHTML = `
-            <h3>🐶 CBG 助手 v3.11.2</h3>
+            <h3>🐶 CBG 助手 v3.11.3</h3>
             <div id="cbg-daily-stats" style="font-size:11px;color:#666;padding:4px 0;border-bottom:1px dashed #eee">今日: 加载中...</div>
             <label style="display:flex;align-items:center;gap:6px;margin:8px 0;cursor:pointer">
                 <input type="checkbox" id="cbg-auto-scan-toggle" checked>
