@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CBG 捡漏助手 v3.8 (导入导出)
 // @namespace    http://tampermonkey.net/
-// @version      3.11.3
+// @version      3.11.4
 // @description  宠物/玉魄等历史记录 + 自动扫描 + 筛选方案管理。
 // @author       YourName
 // @match        *://*.cbg.163.com/*
@@ -33,6 +33,8 @@
     const AUTO_CHECK_PAUSE_MIN = 120;     // 休息 2-4 分钟
     const AUTO_CHECK_PAUSE_MAX = 240;
     const AUTO_CHECK_MAX_PER_RUN = 15;    // 单次最多打开数量
+    const CBG_SEARCH_HISTORY_KEY = 'cbg_search_history';
+    const CBG_SEARCH_HISTORY_MAX = 100;
 
     // 技能缩写映射（宠物胚子常用）
     const SKILL_ABBREV = {
@@ -110,20 +112,16 @@
     function getConfigs() { try { return JSON.parse(localStorage.getItem(CONFIG_KEY) || '{}'); } catch(e) { return {}; } }
     function saveConfigs(data) { localStorage.setItem(CONFIG_KEY, JSON.stringify(data)); }
 
-    function saveCurrentConfig() {
-        const configName = prompt("请输入配置名称 (例如：70级高连隐攻)：");
-        if (!configName) return;
-
+    function captureCurrentPageFilters() {
         const config = {
             inputs: {},
             checkboxes: {},
-            selects: {}, // 新增：保存下拉菜单
+            selects: {},
             skills: [],
             notSkills: [],
             buttonLists: {}
         };
-
-        // 1. 保存所有文本输入框 (Text Inputs)
+        // 1. 文本输入框
         // 直接扫描整页的 text 输入框，优先使用 id，没有则退回到 name
         document.querySelectorAll('input[type="text"]').forEach(el => {
             const key = el.id || el.name;
@@ -176,23 +174,56 @@
             });
             config.buttonLists[panelId] = selectedIndices;
         });
-git
+        return config;
+    }
+
+    function getSearchHistorySummary(config) {
+        const parts = [];
+        if (config.inputs) {
+            const min = config.inputs.min_price || config.inputs.price_min || '';
+            const max = config.inputs.max_price || config.inputs.price_max || '';
+            if (min || max) parts.push((min || '0') + '-' + (max || '∞'));
+        }
+        if (config.skills && config.skills.length) parts.push(config.skills.length + '技');
+        if (config.selects && config.selects.ovarall_sel_server) {
+            const sel = document.querySelector('select#ovarall_sel_server');
+            const opt = sel && sel.querySelector(`option[value="${config.selects.ovarall_sel_server}"]`);
+            if (opt) parts.push((opt.textContent || '').trim().slice(0, 10));
+        }
+        if (config.buttonLists && config.buttonLists.level_desc_panel && config.buttonLists.level_desc_panel.length)
+            parts.push(config.buttonLists.level_desc_panel.length + '级');
+        return parts.join(' ') || '筛选';
+    }
+
+    function getSearchHistory() { try { return JSON.parse(localStorage.getItem(CBG_SEARCH_HISTORY_KEY) || '[]'); } catch(e) { return []; } }
+    function saveSearchHistory(arr) { try { localStorage.setItem(CBG_SEARCH_HISTORY_KEY, JSON.stringify(arr.slice(-CBG_SEARCH_HISTORY_MAX))); } catch(e) {} }
+
+    function addToSearchHistory() {
+        const config = captureCurrentPageFilters();
+        const summary = getSearchHistorySummary(config);
+        let arr = getSearchHistory();
+        const key = JSON.stringify(config);
+        arr = arr.filter(h => JSON.stringify(h.config) !== key);
+        arr.push({ config, summary, createdAt: Date.now() });
+        saveSearchHistory(arr);
+        renderSearchHistoryList();
+    }
+
+    function saveCurrentConfig() {
+        const configName = prompt("请输入配置名称 (例如：70级高连隐攻)：");
+        if (!configName) return;
+        const config = captureCurrentPageFilters();
         const allConfigs = getConfigs();
         allConfigs[configName] = config;
         saveConfigs(allConfigs);
+        addToSearchHistory();
         renderConfigList();
         const statusDiv = document.getElementById('cbg-status');
-        if (statusDiv) {
-            statusDiv.innerHTML = `配置 <b>${configName}</b> 已保存（含全部筛选项）。`;
-        }
+        if (statusDiv) statusDiv.innerHTML = `配置 <b>${configName}</b> 已保存（含全部筛选项）。`;
     }
 
-    function loadConfig(configName) {
-        console.log("正在加载配置:", configName);
-        const allConfigs = getConfigs();
-        const config = allConfigs[configName];
+    function loadConfigFromData(config) {
         if (!config) return;
-
         // 1. 恢复下拉菜单 (Selects) - 先恢复这个，因为可能影响后续
         if (config.selects) {
             // 特殊处理：区服选择需要先切大区，再切服务器，中间给一点时间让服务器列表刷新
@@ -304,6 +335,12 @@ git
                 }
             }
         }, 800); // 稍微延时一点，等待DOM响应
+    }
+
+    function loadConfig(configName) {
+        const allConfigs = getConfigs();
+        const config = allConfigs[configName];
+        if (config) loadConfigFromData(config);
     }
 
     // 一键重置当前页面上的所有筛选条件（不影响已保存的方案）
@@ -488,6 +525,19 @@ git
         }
         if (html === '') html = '<div style="color:#999;text-align:center;padding:10px;">暂无保存的配置</div>';
         container.innerHTML = html;
+    }
+
+    function renderSearchHistoryList() {
+        const sel = document.getElementById('cbg-search-history-select');
+        if (!sel) return;
+        const arr = getSearchHistory();
+        const currentVal = sel.value;
+        sel.innerHTML = '<option value="">-- 拉列表历史（最近100次）--</option>' + arr.slice().reverse().map((h, i) => {
+            const origIdx = arr.length - 1 - i;
+            const time = h.createdAt ? new Date(h.createdAt).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+            return `<option value="${origIdx}">${h.summary || '筛选'} ${time ? '· ' + time : ''}</option>`;
+        }).join('');
+        if (currentVal !== '' && arr[parseInt(currentVal, 10)]) sel.value = currentVal;
     }
 
 
@@ -1721,7 +1771,7 @@ git
         const div = document.createElement('div');
         div.id = 'cbg-helper-panel';
         div.innerHTML = `
-            <h3>🐶 CBG 助手 v3.11.3</h3>
+            <h3>🐶 CBG 助手 v3.11.4</h3>
             <div id="cbg-daily-stats" style="font-size:11px;color:#666;padding:4px 0;border-bottom:1px dashed #eee">今日: 加载中...</div>
             <label style="display:flex;align-items:center;gap:6px;margin:8px 0;cursor:pointer">
                 <input type="checkbox" id="cbg-auto-scan-toggle" checked>
@@ -1735,6 +1785,9 @@ git
             <button id="btn-save-config" class="cbg-btn btn-save">➕ 保存当前筛选</button>
             <button id="btn-reset-filters" class="cbg-btn btn-clear">🧹 重置当前筛选</button>
             <div id="config-list-container" style="max-height: 150px; overflow-y: auto; border: 1px solid #eee; padding: 5px;"></div>
+            <label style="display:block;margin-top:8px;font-size:12px">拉列表历史: <select id="cbg-search-history-select" style="width:100%;padding:6px;margin-top:4px;border:1px solid #ccc;border-radius:4px" title="选择后自动应用并搜索">
+                <option value="">-- 拉列表历史（最近100次）--</option>
+            </select></label>
 
             <button id="btn-keepalive" class="cbg-btn btn-clear" style="margin-bottom:5px">🔄 立即保活</button>
             <div id="cbg-status">准备就绪...</div>
@@ -1763,8 +1816,30 @@ git
             }
         });
 
+        document.getElementById('cbg-search-history-select').addEventListener('change', function() {
+            const idx = this.value;
+            if (idx === '') return;
+            const arr = getSearchHistory();
+            const h = arr[parseInt(idx, 10)];
+            if (h && h.config) { loadConfigFromData(h.config); }
+            this.value = '';
+        });
+
         renderConfigList();
+        renderSearchHistoryList();
         refreshDailyStats();
+
+        // 点击 CBG 搜索按钮时自动加入拉列表历史
+        const attachSearchBtnListener = () => {
+            const btn = document.querySelector('.btn_search') || document.querySelector('#btn_search');
+            if (btn && !btn.dataset.cbgHistoryAttached) {
+                btn.dataset.cbgHistoryAttached = '1';
+                btn.addEventListener('click', () => { addToSearchHistory(); }, true);
+            }
+        };
+        attachSearchBtnListener();
+        const obs = new MutationObserver(() => attachSearchBtnListener());
+        obs.observe(document.body, { childList: true, subtree: true });
 
         // 页面加载完成后启动会话保活
         startKeepAlive();
