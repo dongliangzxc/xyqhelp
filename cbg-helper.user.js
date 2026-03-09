@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CBG 捡漏助手 v3.8 (导入导出)
 // @namespace    http://tampermonkey.net/
-// @version      3.11.1
+// @version      3.11.2
 // @description  宠物/玉魄等历史记录 + 自动扫描 + 筛选方案管理。
 // @author       YourName
 // @match        *://*.cbg.163.com/*
@@ -1192,15 +1192,23 @@ git
         else if (/已下架|已取回|未上架|卖家已取回|卖家取回/.test(statusText) || /已下架|已取回|未上架|卖家已取回|卖家取回/.test(bodyText)) newStatus = 'offline';
         else if (/在售|出售中/.test(statusText) || /在售|出售中/.test(bodyText)) newStatus = 'alive';
 
-        // 解析价格：优先找状态附近的「价格」或「成交价」（避免误匹配相似推荐）
+        // 解析成交价：已售时优先找成交价，多种格式兼容
         let priceVal = null;
-        const statusIdx = Math.max(bodyText.indexOf('状态'), bodyText.indexOf('买家取走'), bodyText.indexOf('已取回'), bodyText.indexOf('卖家已取回'), 0);
-        const block = bodyText.substring(statusIdx, statusIdx + 350);
-        const priceM = block.match(/(?:价格|成交价)[：:]\s*[¥]?\s*([\d.]+)/) || block.match(/[¥]\s*(\d+\.?\d*)/);
-        if (priceM) priceVal = parseFloat(priceM[1]);
-        if (priceVal == null || isNaN(priceVal)) {
-            const fb = bodyText.match(/价格[：:]\s*[¥]?\s*([\d.]+)/) || bodyHtml.match(/价格[：:][^<]*?([\d.]+)/);
-            if (fb) priceVal = parseFloat(fb[1]);
+        const statusIdx = Math.max(bodyText.indexOf('状态'), bodyText.indexOf('买家取走'), bodyText.indexOf('已售'), bodyText.indexOf('已取回'), bodyText.indexOf('卖家已取回'), 0);
+        const block = bodyText.substring(statusIdx, statusIdx + 500);
+        const patterns = [
+            /成交价[：:]\s*[¥]?\s*([\d,]+\.?\d*)/,
+            /成交金额[：:]\s*[¥]?\s*([\d,]+\.?\d*)/,
+            /(?:价格|售价)[：:]\s*[¥]?\s*([\d,]+\.?\d*)/,
+            /[¥￥]\s*([\d,]+\.?\d*)/,
+            /(\d{1,6}(?:\.\d{1,2})?)\s*元/
+        ];
+        for (const re of patterns) {
+            const m = block.match(re) || bodyText.match(re);
+            if (m && m[1]) {
+                const v = parseFloat(m[1].replace(/,/g, ''));
+                if (!isNaN(v) && v > 0 && v < 10000000) { priceVal = v; break; }
+            }
         }
 
         const history = getHistory();
@@ -1369,6 +1377,7 @@ git
             return true;
         }
 
+        let lastFilteredItems = [];
         function doRender() {
             if (!document.getElementById('hm-tbody')) return;
             const history = getHistory();
@@ -1485,6 +1494,7 @@ git
                 </tr>`;
             }).join('') || '<tr><td colspan="8" style="text-align:center;padding:20px">暂无符合条件的数据</td></tr>';
 
+            lastFilteredItems = items;
             document.getElementById('hm-count').textContent = `共 ${items.length} 条`;
             const totalAll = Object.keys(history).length;
             const byType = {};
@@ -1506,6 +1516,8 @@ git
             <div style="display:flex;align-items:center;gap:10px">
                 <button class="hm-btn" id="hm-export" style="padding:4px 10px;color:#fff;border-color:#fff;background:transparent">导出</button>
                 <button class="hm-btn" id="hm-import" style="padding:4px 10px;color:#fff;border-color:#fff;background:transparent">导入</button>
+                <button class="hm-btn" id="hm-auto-check" style="padding:4px 10px;background:#f0ad4e;color:#fff;border:none;border-radius:4px;cursor:pointer" title="当前筛选下未确认的项，每30-60秒自动打开详情页">一键请求</button>
+                <span id="hm-auto-check-status" style="font-size:11px;color:#ffc107"></span>
                 <span id="hm-count">加载中...</span>
                 <span id="hm-close" style="margin-left:5px;cursor:pointer;font-size:24px;color:#fff">&times;</span>
             </div>
@@ -1587,6 +1599,44 @@ git
         });
         document.getElementById('hm-search').addEventListener('input', () => { clearTimeout(window._hmT); window._hmT = setTimeout(doRender, 200); });
         document.getElementById('hm-apply').addEventListener('click', doRender);
+        let autoCheckTimer = null;
+        let autoCheckQueue = [];
+        document.getElementById('hm-auto-check').addEventListener('click', () => {
+            const btn = document.getElementById('hm-auto-check');
+            const statusEl = document.getElementById('hm-auto-check-status');
+            if (autoCheckTimer) {
+                clearTimeout(autoCheckTimer);
+                autoCheckTimer = null;
+                btn.textContent = '一键请求';
+                btn.style.background = '#f0ad4e';
+                if (statusEl) statusEl.textContent = '已停止';
+                return;
+            }
+            const unconfirmed = lastFilteredItems.filter(i => !i.manualStatus);
+            if (unconfirmed.length === 0) {
+                showToast('当前筛选下没有未确认的项');
+                return;
+            }
+            autoCheckQueue = unconfirmed.map(i => i.link).filter(Boolean);
+            btn.textContent = '停止';
+            btn.style.background = '#dc3545';
+            const openNext = () => {
+                if (autoCheckQueue.length === 0) {
+                    autoCheckTimer = null;
+                    btn.textContent = '一键请求';
+                    btn.style.background = '#f0ad4e';
+                    if (statusEl) statusEl.textContent = '已完成';
+                    showToast('已全部打开');
+                    return;
+                }
+                const link = autoCheckQueue.shift();
+                window.open(link, 'cbg_auto_check');
+                if (statusEl) statusEl.textContent = `剩余 ${autoCheckQueue.length} 个，约30-60秒后下一个`;
+                const delay = 30000 + Math.random() * 30000;
+                autoCheckTimer = setTimeout(openNext, delay);
+            };
+            openNext();
+        });
         document.getElementById('hm-export').addEventListener('click', exportHistory);
         document.getElementById('hm-import').addEventListener('click', importHistory);
         modal.addEventListener('hm-import-done', () => { doRender(); refreshDailyStats(); });
@@ -1652,7 +1702,7 @@ git
         const div = document.createElement('div');
         div.id = 'cbg-helper-panel';
         div.innerHTML = `
-            <h3>🐶 CBG 助手 v3.11.1</h3>
+            <h3>🐶 CBG 助手 v3.11.2</h3>
             <div id="cbg-daily-stats" style="font-size:11px;color:#666;padding:4px 0;border-bottom:1px dashed #eee">今日: 加载中...</div>
             <label style="display:flex;align-items:center;gap:6px;margin:8px 0;cursor:pointer">
                 <input type="checkbox" id="cbg-auto-scan-toggle" checked>
